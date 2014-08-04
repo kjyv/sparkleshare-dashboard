@@ -22,7 +22,7 @@ Api = function(app, dp, fp, mw) {
     folderProvider.findAll(function(error, folders) {
       if (error) { return next(error); }
 
-      utils.aclFilterFolderList(folders, req.currentUser);
+      utils.aclFilterFolderList(folders, req.user);
 
       var f = [];
       for (var id in folders) {
@@ -111,8 +111,8 @@ Api = function(app, dp, fp, mw) {
 
   app.get('/api/whoami', middleware.validateAuthCode, function(req, res, next) {
     res.json({
-      login: req.currentUser.login,
-      name: req.currentUser.name,
+      login: req.user.login,
+      name: req.user.name,
       deviceName: req.currentDevice.name
     });
   });

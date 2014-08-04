@@ -17,16 +17,21 @@ var utils = require('./utils');
 var pathlib = require('path');
 
 var RedisStore = require('connect-redis')(session);
-var redis = require('redis'),
-  redisClient = redis.createClient();
+var redis = require('redis');
+var redisClient = redis.createClient();
+
 var session = session({
+  cookie: {
+    maxAge: config.sessionValidFor
+  },
+  resave: true,
+  saveUninitialized: true,
+  rolling: true,
   secret: config.sessionSecret,
-  store: new RedisStore(),
-  cookie: {maxAge: config.sessionValidFor},
-  rolling: true
+  store: new RedisStore()
 });
 
-var sass = require('node-sass')
+var sass = require('node-sass');
 
 var app = null;
 if (config.https.enabled) {
@@ -39,12 +44,12 @@ if (config.https.enabled) {
     key: privateKey,
     cert: certificate
   }
-  app = express()
+  app = express();
   var server = https.createServer(options, app).listen(config.listen.port, function () {
     console.log("Express server listening on port " + config.listen.port);
   });
   if (app.get('env') === 'production') {
-    session.cookie.secure = true  // serve secure cookies
+    session.cookie.secure = true; // serve secure cookies
   }
 } else {
   http = require('http')
@@ -74,6 +79,28 @@ app.use(function (req, res, next) {
   next();
 });
 
+var DeviceProvider = require('./deviceProvider').DeviceProvider;
+var deviceProvider = new DeviceProvider(redisClient);
+var UserProvider = require('./users/userProvider').UserProvider;
+var userProvider = new UserProvider({
+  type: config.userProvider,
+  appId: config.appId,
+  redisClient: redisClient,
+  deviceProvider: deviceProvider
+});
+
+var passport = require('passport');
+
+passport.serializeUser(function (user, next) {
+  userProvider.serializeUser(user, next);
+});
+
+passport.deserializeUser(function (login, next) {
+  userProvider.deserializeUser(login, next);
+});
+
+passport.use(userProvider.strategy)
+
 var bodyParser = require('body-parser');
 var cookieParser = require('cookie-parser');
 var methodOverride = require('method-override');
@@ -86,17 +113,19 @@ app.use(methodOverride());
 app.use(cookieParser());
 app.use(flash());
 app.use(sass.middleware({
-    src: __dirname,
-    dest: pathlib.join(__dirname, 'public'),
-    debug: false
+  src: __dirname,
+  dest: pathlib.join(__dirname, 'public'),
+  debug: false
 }));
 app.use(express.static(__dirname + '/public'));
 app.use(i18n.init);
 app.use(session);
+app.use(passport.initialize());
+app.use(passport.session());
 
 app.use(function (req, res, next) {
   res.locals.session = req.session;
-  res.locals.user = req.session.user;
+  res.locals.user = req.user;
   res.locals.basepath = app.get('basepath');
   res.locals.convertSize = function (bytes) {
     var unit = 0;
@@ -119,10 +148,6 @@ app.use(function (req, res, next) {
 
 var FolderProvider = require('./folderProvider').FolderProvider;
 var folderProvider = new FolderProvider(config.folders);
-var DeviceProvider = require('./deviceProvider').DeviceProvider;
-var deviceProvider = new DeviceProvider(redisClient);
-var UserProvider = require('./userProvider').UserProvider;
-var userProvider = new UserProvider(redisClient, deviceProvider);
 var LinkCodeProvider = require('./linkCodeProvider').LinkCodeProvider;
 var linkCodeProvider = new LinkCodeProvider();
 
@@ -142,20 +167,6 @@ if ('production' == env) {
   app.use(express.errorHandler());
 }
 
-function auth(login, pass, next) {
-  userProvider.findByLogin(login, function (error, user) {
-    if (!user) {
-      return next(new Error('Invalid login'));
-    }
-
-    if (user.checkPassword(pass)) {
-      return next(null, user);
-    } else {
-      return next(new Error('Invalid login'));
-    }
-  });
-}
-
 // Routes
 app.all(/^(?!\/api\/).+/, function (req, res, next) {
   session(req, res, next);
@@ -169,31 +180,40 @@ app.get('/', function (req, res) {
 
 app.get('/logout', function (req, res) {
   req.session.destroy(function () {
+    res.clearCookie('ua_session_token');
     res.redirect('login');
   });
 });
 
-app.get('/login', function (req, res) {
+app.route('/login').get(function (req, res) {
   userProvider.getUserCount(function (error, count) {
     if (count < 1) {
       res.redirect('/createFirstUser');
     } else {
-      if (req.session.user) {
+      if (req.user) {
         res.redirect('/folder');
       } else {
         res.render('login');
       }
     }
   });
+}).post(passport.authenticate(config.userProvider, {
+  failureRedirect: '/login',
+  failureFlash: 'Invalid username or password.'
+}), function (req, res) {
+  if (config.userProvider === "userapp") {
+    res.cookie('ua_session_token', req.user.token);
+    res.redirect('back');
+  }
+
+  res.redirect('back');
 });
 
-app.get('/createFirstUser', middleware.userDbEmpty, function (req, res) {
+app.route('/createFirstUser').get(middleware.userDbEmpty, function (req, res) {
   res.render('createFirstUser', {
     formval: {}
   });
-});
-
-app.post('/createFirstUser', middleware.userDbEmpty, function (req, res) {
+}).post(middleware.userDbEmpty, function (req, res) {
   var reRenderForm = function () {
     res.render('createFirstUser', {
       formval: req.body
@@ -220,32 +240,11 @@ app.post('/createFirstUser', middleware.userDbEmpty, function (req, res) {
   });
 });
 
-app.post('/login', function (req, res) {
-  auth(req.body.login, req.body.password, function (error, user) {
-    if (error) {
-      req.flash('error', error);
-      res.render('login');
-    } else {
-      if (user) {
-        req.session.regenerate(function () {
-          req.session.user = user;
-          res.redirect('back');
-        });
-      } else {
-        req.flash('error', error);
-        res.render('login');
-      }
-    }
-  });
-});
-
-app.get('/changeProfile', middleware.isLogged, function (req, res) {
+app.route('/changeProfile').get(middleware.isLogged, function (req, res) {
   res.render('changeProfile', {
-    formval: req.currentUser
+    formval: req.user
   });
-});
-
-app.post('/changeProfile', middleware.isLogged, function (req, res, next) {
+}).post(middleware.isLogged, function (req, res, next) {
   var reRenderForm = function () {
     res.render('changeProfile', {
       formval: req.body
@@ -262,7 +261,7 @@ app.post('/changeProfile', middleware.isLogged, function (req, res, next) {
     updatePassword = true;
   }
 
-  var user = req.currentUser;
+  var user = req.user;
   if (updatePassword) {
     user.setPassword(req.body.new1);
     req.flash('info', i18n.__('Password updated'));
@@ -286,7 +285,7 @@ app.get('/manageUsers', [middleware.isLogged, middleware.isAdmin], function (req
   });
 });
 
-app.get('/modifyUser/:uid', [middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
+app.route('/modifyUser/:uid').get([middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
   folderProvider.findAll(function (error, folders) {
     if (error) {
       return next(error);
@@ -296,9 +295,7 @@ app.get('/modifyUser/:uid', [middleware.isLogged, middleware.isAdmin, middleware
       folders: folders
     });
   });
-});
-
-app.post('/modifyUser/:uid', [middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
+}).post([middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
   folderProvider.findAll(function (error, folders) {
     if (error) {
       return next(error);
@@ -316,13 +313,11 @@ app.post('/modifyUser/:uid', [middleware.isLogged, middleware.isAdmin, middlewar
   });
 });
 
-app.get('/deleteUser/:uid', [middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
+app.route('/deleteUser/:uid').get([middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
   res.render('deleteUser', {
     u: req.loadedUser
   });
-});
-
-app.post('/deleteUser/:uid', [middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
+}).post([middleware.isLogged, middleware.isAdmin, middleware.loadUser], function (req, res, next) {
   var reRenderForm = function () {
     res.render('deleteUser', {
       u: req.body
@@ -342,13 +337,11 @@ app.post('/deleteUser/:uid', [middleware.isLogged, middleware.isAdmin, middlewar
   });
 });
 
-app.get('/createUser', [middleware.isLogged, middleware.isAdmin], function (req, res) {
+app.route('/createUser').get([middleware.isLogged, middleware.isAdmin], function (req, res) {
   res.render('createUser', {
     formval: {}
   });
-});
-
-app.post('/createUser', [middleware.isLogged, middleware.isAdmin], function (req, res) {
+}).post([middleware.isLogged, middleware.isAdmin], function (req, res) {
   var reRenderForm = function () {
     res.render('createUser', {
       formval: req.body
@@ -377,7 +370,7 @@ app.post('/createUser', [middleware.isLogged, middleware.isAdmin], function (req
 });
 
 //TODO: put logic that is shared between publicFolder and folder into helper func
-app.get('/publicFolder/:folderId', function (req, res, next) {
+app.get('/publicFolder/:folderId', middleware.isLogged, function (req, res, next) {
   folderProvider.findById(req.params.folderId, function (error, folder) {
     if (!folder.pub) {
       next(new errors.Permission('This is not a public folder'));
@@ -413,7 +406,7 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
         return next(error);
       }
 
-      utils.aclFilterFolderList(folders, req.currentUser);
+      utils.aclFilterFolderList(folders, req.user);
 
       //show repo list
       res.render('folders', {
@@ -467,23 +460,23 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
         ]
 
         var is_editable = false;
-        text_types.forEach(function(t){
-            if(res.get('Content-Type').search(t) != -1 ){
-                //display directly if text type
-                //res.set('Content-Disposition', '')
-                res.removeHeader('Content-Disposition')
-                res.set('Content-Type', 'text/plain')
-                is_editable = true
-            }
+        text_types.forEach(function (t) {
+          if (res.get('Content-Type').search(t) != -1) {
+            //display directly if text type
+            //res.set('Content-Disposition', '')
+            res.removeHeader('Content-Disposition')
+            res.set('Content-Type', 'text/plain')
+            is_editable = true
+          }
         });
 
-        view_types.forEach(function(t){
-            if(res.get('Content-Type').search(t) != -1 ){
-                res.set('Content-Disposition', '')
-            }
+        view_types.forEach(function (t) {
+          if (res.get('Content-Type').search(t) != -1) {
+            res.set('Content-Disposition', '')
+          }
         });
 
-        if(req.param('download') == 'force'){
+        if (req.param('download') == 'force') {
           is_editable = false
         }
 
@@ -514,7 +507,7 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
             if (error) {
               return next(error);
             }
-            if(!is_editable)
+            if (!is_editable)
               res.end();
           }
         );
@@ -547,15 +540,19 @@ app.post('/putFile/:folderId', middleware.isLogged, function (req, res, next) {
       }
       var filepath = req.param('path')
       if (req.body.content && filepath) {
-          //call api method or common helper method to save file
-          folder.putFile(req, req.body.content,
-            function (error, data) {
-              if (error) {
-                return next(error);
-              }
-              res.redirect('/folder/'+folder.id+'?type=dir&'+querystring.stringify({path: pathlib.dirname(filepath)}))
+        //call api method or common helper method to save file
+        folder.putFile(req, req.body.content,
+          function (error, data) {
+            if (error) {
+              return next(error);
+            }
+            res.redirect('/folder/' + folder.id + '?type=dir&' + querystring.stringify({
+              path: pathlib.dirname(filepath)
+            }))
           });
-      } else { return next(new Error('no data from form')) }
+      } else {
+        return next(new Error('no data from form'))
+      }
     });
   }
 });
@@ -619,7 +616,7 @@ app.get('/download/:folderId', middleware.isLogged, middleware.checkFolderAcl, f
 });
 
 app.get('/linkedDevices', middleware.isLogged, function (req, res, next) {
-  if (req.currentUser.admin) {
+  if (req.user.admin) {
     deviceProvider.findAll(function (error, devices) {
       if (error) {
         return next(error);
@@ -647,7 +644,7 @@ app.get('/linkedDevices', middleware.isLogged, function (req, res, next) {
       });
     });
   } else {
-    deviceProvider.findByUserId(req.currentUser.uid, function (error, devices) {
+    deviceProvider.findByUserId(req.user.uid, function (error, devices) {
       if (error) {
         return next(error);
       }
@@ -675,13 +672,11 @@ app.get('/linkDevice', middleware.isLogged, function (req, res) {
 });
 
 
-app.get('/unlinkDevice/:did', [middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
+app.route('/unlinkDevice/:did').get([middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
   res.render('unlinkDevice', {
     d: req.loadedDevice
   });
-});
-
-app.post('/unlinkDevice/:did', [middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
+}).post([middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
   var d = req.loadedDevice;
 
   deviceProvider.unlinkDevice(d.id, function (error) {
@@ -697,13 +692,11 @@ app.post('/unlinkDevice/:did', [middleware.isLogged, middleware.loadDevice, midd
   });
 });
 
-app.get('/modifyDevice/:did', [middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
+app.route('/modifyDevice/:did').get([middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
   res.render('modifyDevice', {
     d: req.loadedDevice
   });
-});
-
-app.post('/modifyDevice/:did', [middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
+}).post([middleware.isLogged, middleware.loadDevice, middleware.owningDevice], function (req, res, next) {
   var d = req.loadedDevice;
   d.name = req.body.name;
 
@@ -714,7 +707,7 @@ app.post('/modifyDevice/:did', [middleware.isLogged, middleware.loadDevice, midd
 });
 
 app.get('/getLinkCode', middleware.isLogged, function (req, res) {
-  var code = linkCodeProvider.getNewCode(req.currentUser.uid);
+  var code = linkCodeProvider.getNewCode(req.user.uid);
   var schema = config.https.enabled ? 'https' : 'http';
   code.url = schema + '://' + req.header('host');
 

@@ -5,3 +5,6 @@ user.db.json
 device.db.json
 repos
 node_modules/
+bower_components/
+
+config.js

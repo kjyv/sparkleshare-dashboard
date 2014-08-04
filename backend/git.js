@@ -195,7 +195,7 @@ GitBackend.prototype = {
     var g = spawn(config.backend.git.bin, params, { encoding: 'binary', env: {
       GIT_DIR: this.path
     }});
-
+    
     // under some very weird circumstances the 'exit'
     // event may arise _before_ the 'data' event is triggered
     // and in this case the ondata callback is called with
@@ -400,8 +400,8 @@ GitBackend.prototype = {
 
       //set username and email for new working copy
       function(callback){
-        //console.log("Set user.name")
-        parent.execGit(['config', 'user.name', req.currentUser.name, 'ignore_output'],
+        console.log("Set user.name")
+        parent.execGit(['config', 'user.name', req.user.name, 'ignore_output'],
           function(error, data){
             if (error) { return next(error); }
             callback(null)
@@ -410,8 +410,8 @@ GitBackend.prototype = {
 
       function(callback){
         //TODO: add email field to UserProvider
-        //console.log("Set user.email")
-        parent.execGit(['config', 'user.email', req.currentUser.login+'@'+req.currentUser.deviceName,
+        console.log("Set user.email")
+        parent.execGit(['config', 'user.email', req.user.login+'@'+req.user.deviceName,
           'ignore_output'], function(error, data){
             if (error) { return next(error); }
             callback(null)
