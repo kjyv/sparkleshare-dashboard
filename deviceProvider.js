@@ -1,4 +1,5 @@
 var errors = require('./error');
+var crypto = require('crypto');
 
 DeviceProvider = function(redisClient) {
   this.rclient = redisClient;
@@ -188,8 +189,10 @@ Device.prototype = {
     var chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-_";
     var salt = '';
 
+    // use a cryptographically secure RNG for auth tokens / identifiers
+    var bytes = crypto.randomBytes(len);
     for (var i=0; i < len; i++) {
-      salt += chars.charAt(Math.floor(Math.random() * chars.length));
+      salt += chars.charAt(bytes[i] % chars.length);
     }
     return salt;
   },
@@ -203,7 +206,15 @@ Device.prototype = {
   },
 
   checkAuthCode: function(authCode) {
-    return this.authCode == authCode;
+    if (typeof authCode !== 'string' || typeof this.authCode !== 'string') {
+      return false;
+    }
+    var a = Buffer.from(this.authCode);
+    var b = Buffer.from(authCode);
+    if (a.length !== b.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(a, b);
   }
 };
 

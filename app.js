@@ -26,13 +26,16 @@ let redisStore = new RedisStore({ client: redisClient })
 
 let session = ExpressSession({
   cookie: {
-    maxAge: config.sessionValidFor
+    maxAge: config.sessionValidFor,
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: config.https.enabled
   },
   resave: true,
-  saveUninitialized: true,
+  saveUninitialized: false,
   rolling: true,
   secret: config.sessionSecret,
-  store: redisStore 
+  store: redisStore
 });
 
 var sass = require('sass');
@@ -52,9 +55,6 @@ if (config.https.enabled) {
   var server = https.createServer(options, app).listen(config.listen.port, function () {
     console.log("Express server listening on port " + config.listen.port);
   });
-  if (app.get('env') === 'production') {
-    session.cookie.secure = true; // serve secure cookies
-  }
 } else {
   http = require('http')
   app = express()
@@ -167,6 +167,11 @@ app.use(function (req, res, next) {
   res.header('Cache-Control', 'no-cache, private, no-store, must-revalidate, max-stale=0, post-check=0, pre-check=0, max-age=0')
   res.header('Expires', '-1')
   res.header('Pragma', 'no-cache')
+
+  //baseline hardening headers
+  res.header('X-Content-Type-Options', 'nosniff')
+  res.header('X-Frame-Options', 'SAMEORIGIN')
+  res.header('Referrer-Policy', 'same-origin')
   next();
 });
 
@@ -177,21 +182,6 @@ var linkCodeProvider = new LinkCodeProvider();
 
 var middleware = require('./middleware');
 middleware.setup(userProvider, deviceProvider, folderProvider, linkCodeProvider);
-
-var env = process.env.NODE_ENV || 'development';
-if ('development' == env) {
-  app.use(require('errorhandler')({
-    dumpExceptions: true,
-    showStack: true
-  }));
-}
-
-if ('production' == env) {
-  app.use(require('errorhandler')({
-    dumpExceptions: false,
-    showStack: false
-  }));
-}
 
 // Routes
 app.all(/^(?!\/api\/).+/, function (req, res, next) {
@@ -491,8 +481,14 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
           }
         });
 
+        //SVG (and XML-based images) can carry embedded <script>; never serve
+        //them inline as that would execute in the dashboard's origin (stored XSS).
+        //Such files keep their attachment Content-Disposition and are downloaded.
+        var ctype = res.get('Content-Type') || '';
+        var inlineSafe = ctype.search('svg') == -1 && ctype.search('xml') == -1;
+
         view_types.forEach(function (t) {
-          if (res.get('Content-Type').search(t) != -1) {
+          if (inlineSafe && ctype.search(t) != -1) {
             res.set('Content-Disposition', '')
           }
         });
@@ -551,7 +547,7 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
   }
 });
 
-app.post('/putFile/:folderId', middleware.isLogged, function (req, res, next) {
+app.post('/putFile/:folderId', [middleware.isLogged, middleware.checkFolderAcl], function (req, res, next) {
   if (!req.params.folderId) {
     return next(new Error('No folder id given'))
   } else {
@@ -748,6 +744,9 @@ app.get('/stylesheets', function (req, res, next) {
 app.get('*', function (req, res, next) {
   next(new errors.NotFound(req.url));
 });
+
+// error handler must be registered after all routes so next(err) reaches it
+app.use(errors.errorHandler);
 
 function runApp() {
   app.listen(config.listen.port, config.listen.host, function () {

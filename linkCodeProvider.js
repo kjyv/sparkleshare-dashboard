@@ -1,4 +1,5 @@
 var config = require('./config');
+var crypto = require('crypto');
 
 LinkCodeProvider = function() {
   this.validCodes = [];
@@ -11,7 +12,9 @@ LinkCodeProvider.prototype = {
   getNewCode: function(uid) {
     this.gc();
 
-    var code = Math.floor(Math.random() * Math.pow(10, this.codeLen)).toString();
+    // cryptographically secure, uniformly distributed numeric code
+    var max = Math.pow(10, this.codeLen);
+    var code = crypto.randomInt(0, max).toString();
     code = (new Array(this.codeLen - code.length + 1)).join("0") + code;
 
     this.validCodes.push({

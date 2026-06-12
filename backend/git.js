@@ -291,6 +291,12 @@ GitBackend.prototype = {
       path = '';
     }
 
+    //a supplied tree-ish must be a full git object hash; reject anything else
+    //so it can't be interpreted as a git option (argument injection)
+    if (baseHash && !baseHash.match(/^[a-f0-9]{40}$/)) {
+      return next(new Error('Invalid hash'));
+    }
+
     var mybackend = this;
     function getItemsFromHere(baseHash, path, next) {
       var execPath = path;
@@ -298,14 +304,14 @@ GitBackend.prototype = {
         baseHash = 'HEAD';
       }
 
-      mybackend.execGit(['ls-tree', '-z', '-l', baseHash, '.'], function(error, data) {
+      mybackend.execGit(['ls-tree', '-z', '-l', baseHash, '--', '.'], function(error, data) {
         if (error) { return next(error); }
         parseList(data, path, next);
       });
     }
 
     if (!baseHash && path) {
-      this.execGit(['ls-tree', '-z', '-l', 'HEAD', path], function(error, data) {
+      this.execGit(['ls-tree', '-z', '-l', 'HEAD', '--', path], function(error, data) {
         if (error) { return next(error); }
         parseList(data, path, function(error, list) {
           if (error) { return next(error); }

@@ -24,8 +24,18 @@ LocalUserProvider = function (options, redisClient, deviceProvider) {
   })
 }
 
+// legacy password hash (single-round HMAC-SHA256) kept only to verify
+// passwords stored before the scrypt migration
 function hash(msg, key) {
   return crypto.createHmac('sha256', key).update(msg).digest('hex');
+}
+
+var SCRYPT_KEYLEN = 64;
+
+// scrypt-based password hash, self-describing format: scrypt$<saltHex>$<hashHex>
+function scryptHash(password, saltBuf) {
+  var derived = crypto.scryptSync(String(password), saltBuf, SCRYPT_KEYLEN);
+  return 'scrypt$' + saltBuf.toString('hex') + '$' + derived.toString('hex');
 }
 
 LocalUserProvider.prototype = {
@@ -215,24 +225,34 @@ User = function (data) {
 };
 
 User.prototype = {
-  genSalt: function (len) {
-    var chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
-    var salt = '';
-
-    for (var i = 0; i < len; i++) {
-      salt += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return salt;
-  },
-
   setPassword: function (password) {
-    var salt = this.genSalt(8);
-    this.pass = hash(password, salt);
-    this.salt = salt;
+    // store using scrypt; salt is embedded in the hash string
+    this.pass = scryptHash(password, crypto.randomBytes(16));
+    this.salt = '';
   },
 
   checkPassword: function (password) {
-    return this.pass == hash(password, this.salt);
+    if (typeof this.pass !== 'string' || this.pass.length === 0) {
+      return false;
+    }
+
+    // new scrypt format: scrypt$<saltHex>$<hashHex>
+    if (this.pass.indexOf('scrypt$') === 0) {
+      var parts = this.pass.split('$');
+      if (parts.length !== 3) {
+        return false;
+      }
+      var saltBuf = Buffer.from(parts[1], 'hex');
+      var expected = Buffer.from(parts[2], 'hex');
+      var actual = crypto.scryptSync(String(password), saltBuf, expected.length);
+      return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+    }
+
+    // legacy HMAC-SHA256 format (verified in constant time, upgraded on next change)
+    var legacyExpected = Buffer.from(this.pass);
+    var legacyActual = Buffer.from(hash(password, this.salt));
+    return legacyExpected.length === legacyActual.length &&
+      crypto.timingSafeEqual(legacyExpected, legacyActual);
   }
 };
 
