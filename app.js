@@ -551,7 +551,7 @@ app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, fu
   }
 });
 
-app.post('/putFile/:folderId', middleware.isLogged, function (req, res, next) {
+app.post('/putFile/:folderId', [middleware.isLogged, middleware.checkFolderAcl], function (req, res, next) {
   if (!req.params.folderId) {
     return next(new Error('No folder id given'))
   } else {

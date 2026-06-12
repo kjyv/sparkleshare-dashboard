@@ -219,8 +219,10 @@ User.prototype = {
     var chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
     var salt = '';
 
+    // use a cryptographically secure RNG for the password salt
+    var bytes = crypto.randomBytes(len);
     for (var i = 0; i < len; i++) {
-      salt += chars.charAt(Math.floor(Math.random() * chars.length));
+      salt += chars.charAt(bytes[i] % chars.length);
     }
     return salt;
   },
@@ -232,7 +234,12 @@ User.prototype = {
   },
 
   checkPassword: function (password) {
-    return this.pass == hash(password, this.salt);
+    var expected = Buffer.from(this.pass);
+    var actual = Buffer.from(hash(password, this.salt));
+    if (expected.length !== actual.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(expected, actual);
   }
 };
 

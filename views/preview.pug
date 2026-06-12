@@ -28,9 +28,9 @@ block main
             });
 
     div#preview-box
-        pre !{data}
+        pre= data
 
     form(action=basepath + '/putFile/'+parent.id+'?path='+path, method='post')
-        textarea(name='content').edit-box !{data}
+        textarea(name='content').edit-box= data
         input(type='submit', value=__i('Save file')).edit-save
 
