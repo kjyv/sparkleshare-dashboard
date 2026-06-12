@@ -33,6 +33,9 @@ function Conflict(msg) {
 util.inherits(Conflict, Error);
 
 function errorHandler(err, req, res, next) {
+  var name = err.name;
+  var message = err.message;
+
   if (err instanceof NotFound) {
     res.statusCode = 404;
   } else if (err instanceof Permission) {
@@ -40,23 +43,27 @@ function errorHandler(err, req, res, next) {
   } else if (err instanceof Conflict) {
     res.statusCode = 409;
   } else {
+    // unexpected error: log details server-side, but show a generic message
+    // to the client so we don't leak internals (paths, git stderr, stacks)
     res.statusCode = 500;
-    return next();
+    console.error(err && err.stack ? err.stack : err);
+    name = 'Internal Server Error';
+    message = 'Internal Server Error';
   }
 
   var accept = req.headers.accept || '';
   if (~accept.indexOf('html')) {
     // html
-    res.render('error', { e: err });
+    res.render('error', { e: { name: name, message: message } });
   } else if (~accept.indexOf('json')) {
     // json
-    var json = JSON.stringify({ error: err.name, msg: err.message });
+    var json = JSON.stringify({ error: name, msg: message });
     res.setHeader('Content-Type', 'application/json');
     res.end(json);
   } else {
     // plain text
     res.setHeader('Content-Type', 'text/plain');
-    res.end(err.name + ": " + err.message);
+    res.end(name + ": " + message);
   }
 }
 

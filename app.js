@@ -183,21 +183,6 @@ var linkCodeProvider = new LinkCodeProvider();
 var middleware = require('./middleware');
 middleware.setup(userProvider, deviceProvider, folderProvider, linkCodeProvider);
 
-var env = process.env.NODE_ENV || 'development';
-if ('development' == env) {
-  app.use(require('errorhandler')({
-    dumpExceptions: true,
-    showStack: true
-  }));
-}
-
-if ('production' == env) {
-  app.use(require('errorhandler')({
-    dumpExceptions: false,
-    showStack: false
-  }));
-}
-
 // Routes
 app.all(/^(?!\/api\/).+/, function (req, res, next) {
   session(req, res, next);
@@ -759,6 +744,9 @@ app.get('/stylesheets', function (req, res, next) {
 app.get('*', function (req, res, next) {
   next(new errors.NotFound(req.url));
 });
+
+// error handler must be registered after all routes so next(err) reaches it
+app.use(errors.errorHandler);
 
 function runApp() {
   app.listen(config.listen.port, config.listen.host, function () {

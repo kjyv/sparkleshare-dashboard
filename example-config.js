@@ -1,3 +1,8 @@
+// Secret used to sign session cookies. Use a long, random, secret value and
+// keep it private: anyone who knows it can forge session cookies.
+// Generate one with, e.g.:
+//   openssl rand -base64 48
+//   node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 exports.sessionSecret = 'JustSomeRandomString';
 
 exports.folders = [
