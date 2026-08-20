@@ -17,10 +17,9 @@ var pathlib = require('path');
 
 const redis = require('redis')
 const ExpressSession = require('express-session');
-let RedisStore = require('connect-redis')(ExpressSession);
+const RedisStore = require('connect-redis').RedisStore;
 
-let redisClient = redis.createClient();
-redisClient.unref()
+let redisClient = redis.createClient(config.redis || {});
 redisClient.on('error', console.log)
 let redisStore = new RedisStore({ client: redisClient })
 
@@ -217,7 +216,7 @@ app.route('/login').get(function (req, res) {
   failureRedirect: '/login',
   failureFlash: 'Invalid username or password.'
 }), function (req, res) {
-  res.redirect('back');
+  res.redirect('/folder');
 });
 
 app.route('/createFirstUser').get(middleware.userDbEmpty, function (req, res) {
@@ -281,7 +280,7 @@ app.route('/changeProfile').get(middleware.isLogged, function (req, res) {
 
   userProvider.updateUser(user, function (error) {
     req.flash('info', i18n.__('Profile updated'));
-    res.redirect('back');
+    res.redirect('/changeProfile');
   });
 });
 
@@ -319,7 +318,7 @@ app.route('/modifyUser/:uid').get([middleware.isLogged, middleware.isAdmin, midd
 
     userProvider.updateUser(u, function (error) {
       req.flash('info', i18n.__('User updated'));
-      res.redirect('back');
+      res.redirect('/manageUsers');
     });
   });
 });
@@ -410,7 +409,7 @@ app.get('/publicFolder/:folderId', middleware.isLogged, function (req, res, next
   });
 });
 
-app.get('/folder/:folderId?', middleware.isLogged, middleware.checkFolderAcl, function (req, res, next) {
+app.get(['/folder', '/folder/:folderId'], middleware.isLogged, middleware.checkFolderAcl, function (req, res, next) {
   if (!req.params.folderId) {
     folderProvider.findAll(function (error, folders) {
       if (error) {
@@ -574,7 +573,7 @@ app.post('/putFile/:folderId', [middleware.isLogged, middleware.checkFolderAcl],
   }
 });
 
-app.get('/recentchanges/:folderId?', middleware.isLogged, middleware.checkFolderAcl, function (req, res, next) {
+app.get(['/recentchanges', '/recentchanges/:folderId'], middleware.isLogged, middleware.checkFolderAcl, function (req, res, next) {
   folderProvider.findById(req.params.folderId, function (error, folder) {
     if (error) {
       return next(error);
@@ -719,7 +718,7 @@ app.route('/modifyDevice/:did').get([middleware.isLogged, middleware.loadDevice,
 
   deviceProvider.updateDevice(d, function (error) {
     req.flash('info', i18n.__('Device updated'));
-    res.redirect('back');
+    res.redirect('/linkedDevices');
   });
 });
 
@@ -741,7 +740,7 @@ app.get('/stylesheets', function (req, res, next) {
   next();
 });
 
-app.get('*', function (req, res, next) {
+app.use(function (req, res, next) {
   next(new errors.NotFound(req.url));
 });
 
@@ -761,5 +760,13 @@ function runApp() {
   }
 }
 
-// upgrade database
-require('./upgrade').upgrade(redisClient, runApp);
+redisClient.connect().then(function () {
+  //the listening socket keeps the process alive; the redis socket need not
+  redisClient.unref();
+
+  // upgrade database
+  require('./upgrade').upgrade(redisClient, runApp);
+}, function (error) {
+  console.error('could not connect to redis: ' + (error && error.message ? error.message : error));
+  process.exit(1);
+});
