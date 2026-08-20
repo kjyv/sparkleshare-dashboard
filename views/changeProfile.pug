@@ -4,12 +4,16 @@ block main
   h1 #{__i('Change profile')}
 
   form(method="post", action=basepath + "/changeProfile")
+    input(type="hidden", name="_csrf", value=csrfToken)
     p
       label #{__i('Name:')}
       input(name="name", value=formval.name)
     p
       label #{__i('New password (leave empty for no change):')}
       input(type="password", name="new1", id="newpass1")
+    p#currentpassblock
+      label #{__i('Current password (required to set a new one):')}
+      input(type="password", name="current", id="currentpass", autocomplete="current-password")
     p#newpass2block
       label #{__i('Check new password:')}
       input(type="password", name="new2", id="newpass2")
