@@ -1,27 +1,25 @@
-  $(function() {
-    $("#newpass2block").hide();
-    $("#currentpassblock").hide();
-  });
+ui.ready(function () {
+  var newPass = ui.byId('newpass1');
+  // both only apply once a new password is actually being set
+  var extraBlocks = [ui.byId('newpass2block'), ui.byId('currentpassblock')];
 
-  function showHideNewPass2() {
-    var p1 = $("#newpass1").val();
-    if (p1.length) {
-      $("#newpass2block").show('fast');
-      $("#currentpassblock").show('fast');
-    } else {
-      $("#newpass2block").hide('fast');
-      $("#currentpassblock").hide('fast');
-    }
+  if (!newPass) {
+    return;
   }
 
-  $("#newpass1").blur(function() {
-    showHideNewPass2();
-  });
+  function sync() {
+    var setting = newPass.value.length !== 0;
+    extraBlocks.forEach(function (block) {
+      if (setting) {
+        ui.show(block);
+      } else {
+        ui.hide(block);
+      }
+    });
+  }
 
-  $("#newpass1").change(function() {
-    showHideNewPass2();
+  sync();
+  ['input', 'change', 'blur', 'keyup'].forEach(function (event) {
+    newPass.addEventListener(event, sync);
   });
-
-  $("#newpass1").keydown(function() {
-    showHideNewPass2();
-  });
+});

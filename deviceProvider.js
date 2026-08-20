@@ -177,22 +177,91 @@ DeviceProvider.prototype = {
         next();
       }, next);
     });
+  },
+
+  // One-time migration for records written while tokens were stored in
+  // cleartext. Only the stored form changes, so linked devices keep working and
+  // nothing has to be re-linked.
+  rehashStoredAuthCodes: function(next) {
+    var provider = this;
+
+    toCallback(provider.rclient.sMembers("deviceIds"), function(error, ids) {
+      if (error) { return next(error); }
+      if (!ids || ids.length === 0) { return next(); }
+
+      var pending = ids.length;
+      var firstError = null;
+      var migrated = 0;
+
+      function done(error) {
+        if (error && !firstError) { firstError = error; }
+        if (--pending === 0) {
+          if (migrated > 0) {
+            console.log("DB UPGRADE: replaced " + migrated + " cleartext device auth token(s) with a hash");
+          }
+          next(firstError);
+        }
+      }
+
+      ids.forEach(function(did) {
+        var key = "deviceId:" + did + ":device";
+        toCallback(provider.rclient.get(key), function(error, data) {
+          if (error) { return done(error); }
+          if (!data) { return done(); }
+
+          var stored;
+          try {
+            stored = JSON.parse(data);
+          } catch (e) {
+            return done();
+          }
+          if (!stored.authCode) {
+            return done();
+          }
+
+          migrated++;
+          //the constructor hashes a cleartext token it finds, and toJSON omits
+          //the cleartext, so re-saving is the whole migration
+          toCallback(provider.rclient.set(key, JSON.stringify(new Device(stored))), done);
+        });
+      });
+    });
   }
 };
+
+// The auth code is a 200-character token from a 64-character alphabet, so it
+// carries far more entropy than any password and cannot be brute forced from
+// its digest; a plain SHA-256 is enough and no salt or KDF is warranted.
+function hashAuthCode(authCode) {
+  return crypto.createHash('sha256').update(String(authCode), 'utf8').digest('hex');
+}
 
 Device = function(data) {
   if (data) {
     this.id = data.id;
     this.ident = data.ident;
-    this.authCode = data.authCode;
     this.name = data.name;
     this.ownerUid = data.ownerUid;
+
+    if (data.authHash) {
+      this.authHash = data.authHash;
+    } else if (data.authCode) {
+      // record written before tokens were hashed: convert on load so that
+      // saving it again drops the cleartext, without invalidating the token
+      this.authHash = hashAuthCode(data.authCode);
+    } else {
+      this.authHash = null;
+    }
   } else {
     this.id = null;
     this.ident = this.genIdent();
-    this.authCode = this.genAuthCode();
     this.name = "";
     this.ownerUid = null;
+
+    // the cleartext exists only on this in-memory instance, to hand back to
+    // the client once; toJSON below keeps it out of the stored record
+    this.authCode = this.genAuthCode();
+    this.authHash = hashAuthCode(this.authCode);
   }
 };
 
@@ -218,15 +287,27 @@ Device.prototype = {
   },
 
   checkAuthCode: function(authCode) {
-    if (typeof authCode !== 'string' || typeof this.authCode !== 'string') {
+    if (typeof authCode !== 'string' || typeof this.authHash !== 'string') {
       return false;
     }
-    var a = Buffer.from(this.authCode);
-    var b = Buffer.from(authCode);
-    if (a.length !== b.length) {
+    var expected = Buffer.from(this.authHash, 'hex');
+    var actual = Buffer.from(hashAuthCode(authCode), 'hex');
+    if (expected.length !== actual.length) {
       return false;
     }
-    return crypto.timingSafeEqual(a, b);
+    return crypto.timingSafeEqual(expected, actual);
+  },
+
+  // keeps the cleartext token out of redis: only ever returned to the client
+  // that created the device
+  toJSON: function() {
+    return {
+      id: this.id,
+      ident: this.ident,
+      authHash: this.authHash,
+      name: this.name,
+      ownerUid: this.ownerUid
+    };
   }
 };
 
