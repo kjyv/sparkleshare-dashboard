@@ -10,8 +10,23 @@ Api = function(app, dp, fp, mw) {
   folderProvider = fp;
   middleware = mw;
 
-  app.post('/api/getAuthCode', middleware.validateLinkCode, function(req, res) {
-    deviceProvider.createNew(req.query.name, req.linkCodeForUid, function(error, dev) {
+  app.post('/api/getAuthCode', middleware.validateLinkCode, function(req, res, next) {
+    //the clients post the device name in the form body alongside the link code;
+    //only the query string was read before, so every device linked from a phone
+    //was stored nameless and showed up as "", " (1)", " (2)" in the device list.
+    //The query string is still accepted for anything that sends it there.
+    var name = (req.body && req.body.name) || req.query.name;
+    if (typeof name !== 'string') {
+      name = '';
+    }
+
+    deviceProvider.createNew(name, req.linkCodeForUid, function(error, dev) {
+      //without this an error left dev undefined, and the TypeError below came
+      //out of a promise callback - an unhandled rejection, which is fatal
+      if (error) {
+        return next(error);
+      }
+
       res.json({
         ident: dev.ident,
         authCode: dev.authCode
