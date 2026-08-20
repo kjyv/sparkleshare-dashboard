@@ -1,5 +1,21 @@
 var config = require('./config');
 
+// Headers carrying credentials: the session cookie and the permanent device
+// token. Debug logs are routinely pasted into bug reports, so these are never
+// written out verbatim.
+var REDACTED_HEADERS = ['cookie', 'set-cookie', 'authorization', 'x-sparkle-auth'];
+
+function redactHeaders(headers) {
+  var safe = {};
+  for (var name in headers) {
+    if (Object.prototype.hasOwnProperty.call(headers, name)) {
+      safe[name] = REDACTED_HEADERS.indexOf(name.toLowerCase()) === -1
+        ? headers[name] : '[redacted]';
+    }
+  }
+  return safe;
+}
+
 module.exports = {
   aclFilterFolderList: function(folders, user) {
     if (!user.admin) {
@@ -37,7 +53,7 @@ module.exports = {
           " \033[90m" +
           (new Date() - req._startTime) +
           "ms\033[0m" +
-          " C: " + JSON.stringify(req.headers);
+          " C: " + JSON.stringify(redactHeaders(req.headers));
       };
     }
 

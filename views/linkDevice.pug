@@ -23,43 +23,81 @@ block main
       span#timeleft 0
       | #{__i('seconds')}.
 
-  script(type="text/javascript").
-    $(function() {
-      function updateQr() {
-        var lqr = $('#linkqr');
-        if (lqr.data('state') != 'updating') {
-          lqr.data('state', 'updating');
-          lqr.html('<img src="#{basepath}/images/throbber.gif" alt="loading"/>');
-          $('#linkcode').html('-----');
-          $('#timeleft').html('?');
+  script(type="text/javascript", nonce=cspNonce).
+    (function () {
+      var codeUrl = "#{basepath}/getLinkCode";
+      var throbberUrl = "#{basepath}/images/throbber.gif";
+      var csrfToken = "#{csrfToken}";
 
-          $.ajax({
-            url: "#{basepath}/getLinkCode",
-            dataType: 'json',
-            success: function(data) {
-              $('#linkqr').html('');
-              $('#linkcode').html(data.code);
-              $('#timeleft').html(data.validFor);
-              append_qrcode(4, 'linkqr', 'SSHARE:' + data.url + '#' + data.code);
-              $('#linkqr').data('validLeft', data.validFor);
-              lqr.data('state', 'updated');
-            }
-          });
+      var qr, codeEl, timeEl;
+      var updating = false;
+      var validLeft = 0;
+
+      function empty(el) {
+        while (el.firstChild) {
+          el.removeChild(el.firstChild);
         }
       }
 
-      function checkForUpdateQr() {
-        var vl = $('#linkqr').data('validLeft');
-        if (!vl || vl <= 1) {
+      function updateQr() {
+        if (updating) {
+          return;
+        }
+        updating = true;
+
+        empty(qr);
+        var throbber = document.createElement('img');
+        throbber.src = throbberUrl;
+        throbber.alt = 'loading';
+        qr.appendChild(throbber);
+        codeEl.textContent = '-----';
+        timeEl.textContent = '?';
+
+        //the token goes in a header so the request needs no body; middleware
+        //accepts either
+        fetch(codeUrl, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrfToken },
+          credentials: 'same-origin'
+        }).then(function (response) {
+          if (!response.ok) {
+            throw new Error('could not get a link code: ' + response.status);
+          }
+          return response.json();
+        }).then(function (data) {
+          empty(qr);
+          codeEl.textContent = data.code;
+          timeEl.textContent = data.validFor;
+          append_qrcode(4, 'linkqr', 'SSHARE:' + data.url + '#' + data.code);
+          validLeft = data.validFor;
+          updating = false;
+        }).catch(function (error) {
+          empty(qr);
+          codeEl.textContent = '-----';
+          timeEl.textContent = '?';
+          //leave validLeft at 0 so the next tick retries
+          updating = false;
+          console.error(error);
+        });
+      }
+
+      function tick() {
+        if (validLeft <= 1) {
           updateQr();
         } else {
-          $('#linkqr').data('validLeft', vl - 1);
-          $('#timeleft').html(vl - 1);
+          validLeft -= 1;
+          timeEl.textContent = validLeft;
         }
       }
 
-      checkForUpdateQr();
-      setInterval(function() {
-        checkForUpdateQr();
-      }, 1000);
-    });
+      ui.ready(function () {
+        qr = ui.byId('linkqr');
+        codeEl = ui.byId('linkcode');
+        timeEl = ui.byId('timeleft');
+        if (!qr || !codeEl || !timeEl) {
+          return;
+        }
+        tick();
+        setInterval(tick, 1000);
+      });
+    })();

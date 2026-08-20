@@ -8,6 +8,7 @@ block main
       | "#{d.ident}"
 
   form(method="post", action=basepath + "/modifyDevice/" + d.id)
+    input(type="hidden", name="_csrf", value=csrfToken)
     p
       label #{__i('Device name')}:
       input(name="name", value=d.name)
