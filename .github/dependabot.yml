@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Security advisories always get their own PR regardless of the groups below.
+    groups:
+      # Routine patch/minor bumps arrive as one PR instead of a dozen.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Majors that need code changes, not just a version bump:
+      #   redis 4+/connect-redis 7+ replace the v3 callback API with promises
+      #   express 5 / body-parser 2 change routing and error semantics
+      #   mime 4 is ESM-only and cannot be require()d
+      - dependency-name: redis
+        update-types: ["version-update:semver-major"]
+      - dependency-name: connect-redis
+        update-types: ["version-update:semver-major"]
+      - dependency-name: express
+        update-types: ["version-update:semver-major"]
+      - dependency-name: body-parser
+        update-types: ["version-update:semver-major"]
+      - dependency-name: mime
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

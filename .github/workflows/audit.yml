@@ -1,0 +1,23 @@
+name: audit
+
+# Dependabot already reports advisories against the committed lockfile on a
+# schedule. This job exists for the one thing alerts don't do: fail a PR that
+# introduces a vulnerable dependency, before it reaches master.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npm audit --audit-level=moderate

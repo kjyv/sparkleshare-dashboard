@@ -3,24 +3,25 @@
   "version": "1.1.5",
   "private": true,
   "dependencies": {
-    "async": "^2.6.4",
-    "body-parser": "^1.20.x",
-    "connect-flash": "^0.1.x",
-    "connect-redis": "^4.0.x",
-    "cookie-parser": "^1.4.x",
-    "express": "^4.22.x",
-    "express-session": "^1.17.x",
-    "i18n": "^0.15.x",
-    "method-override": "^3.0.x",
-    "mime": "^2.4.x",
-    "morgan": "^1.9.x",
-    "sass": "^1.x",
-    "passport": "^0.6.0",
-    "passport-local": "^1.0.x",
-    "pug": "^3.0.2",
-    "redis": "^3.1.2"
+    "async": "^3.2.6",
+    "body-parser": "^1.20.6",
+    "connect-flash": "^0.1.1",
+    "connect-redis": "^4.0.4",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.22.2",
+    "express-session": "^1.19.0",
+    "i18n": "^0.15.3",
+    "method-override": "^3.0.0",
+    "mime": "^2.6.0",
+    "morgan": "^1.11.0",
+    "passport": "^0.7.0",
+    "passport-local": "^1.0.0",
+    "pug": "^3.0.4",
+    "redis": "^3.1.2",
+    "sass": "^1.103.0"
   },
   "scripts": {
-    "start": "node ./app.js"
+    "start": "node ./app.js",
+    "audit": "npm audit --audit-level=moderate"
   }
 }
