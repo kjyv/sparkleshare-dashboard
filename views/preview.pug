@@ -18,12 +18,15 @@ block main
       li
         a#edit-link #{__i('Edit file')}
         script.
-            $(document).ready(function(){
-                $("#edit-link").click(function() {
-                    $("#preview-box").hide();
-                    $("textarea.edit-box").show();
-                    $("input.edit-save").show();
-                    $(this).hide();
+            ui.ready(function () {
+                var link = ui.byId('edit-link');
+                if (!link) {
+                    return;
+                }
+                link.addEventListener('click', function () {
+                    ui.hide(ui.byId('preview-box'));
+                    document.querySelectorAll('textarea.edit-box, input.edit-save').forEach(ui.show);
+                    ui.hide(link);
                 });
             });
 

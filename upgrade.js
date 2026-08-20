@@ -52,5 +52,10 @@ function createUserDeviceNames(rclient, next) {
 }
 
 exports.upgrade = function(rclient, next) {
-  createUserDeviceNames(rclient, next);
+  createUserDeviceNames(rclient, function(error) {
+    if (error) { return next(error); }
+
+    var DeviceProvider = require('./deviceProvider').DeviceProvider;
+    new DeviceProvider(rclient).rehashStoredAuthCodes(next);
+  });
 };

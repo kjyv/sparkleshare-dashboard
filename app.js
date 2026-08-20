@@ -26,6 +26,37 @@ let redisClient = redis.createClient(config.redis || {});
 redisClient.on('error', console.log)
 let redisStore = new RedisStore({ client: redisClient })
 
+// The session secret signs the cookies that carry every login, so a guessable
+// one lets anybody mint a session for any user, admins included. The value in
+// example-config.js is published in this repository, so leaving it in place is
+// the same as having no authentication at all - warn loudly rather than let it
+// pass unnoticed.
+function checkSessionSecret() {
+  var secret = config.sessionSecret;
+  var problem = null;
+
+  if (!secret || typeof secret !== 'string') {
+    problem = 'is missing';
+  } else if (secret === 'JustSomeRandomString') {
+    problem = 'is still the placeholder from example-config.js, which is public';
+  } else if (secret.length < 32) {
+    problem = 'is only ' + secret.length + ' characters; use at least 32';
+  }
+
+  if (problem) {
+    console.error('');
+    console.error('  ****************************************************************');
+    console.error('  * WARNING: config.sessionSecret ' + problem);
+    console.error('  * Anyone who knows it can forge a session for any user.');
+    console.error('  * Generate one with:');
+    console.error('  *   node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64\'))"');
+    console.error('  ****************************************************************');
+    console.error('');
+  }
+}
+
+checkSessionSecret();
+
 let session = ExpressSession({
   cookie: {
     maxAge: config.sessionValidFor,
