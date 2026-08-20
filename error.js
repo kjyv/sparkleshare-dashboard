@@ -32,6 +32,14 @@ function Conflict(msg) {
 }
 util.inherits(Conflict, Error);
 
+function TooManyRequests(msg) {
+  this.name = 'Too Many Requests';
+  this.message = msg ? msg : '';
+  Error.call(this, msg);
+  Error.captureStackTrace(this, arguments.callee);
+}
+util.inherits(TooManyRequests, Error);
+
 function errorHandler(err, req, res, next) {
   var name = err.name;
   var message = err.message;
@@ -42,6 +50,8 @@ function errorHandler(err, req, res, next) {
     res.statusCode = 403;
   } else if (err instanceof Conflict) {
     res.statusCode = 409;
+  } else if (err instanceof TooManyRequests) {
+    res.statusCode = 429;
   } else {
     // unexpected error: log details server-side, but show a generic message
     // to the client so we don't leak internals (paths, git stderr, stacks)
@@ -71,5 +81,6 @@ module.exports = {
   NotFound: NotFound,
   Permission: Permission,
   Conflict: Conflict,
+  TooManyRequests: TooManyRequests,
   errorHandler: errorHandler
 };

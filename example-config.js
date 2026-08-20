@@ -31,6 +31,14 @@ exports.externalUrl = null;
 //   exports.redis = { url: 'redis://:password@redis.internal:6379/0' };
 exports.redis = {};
 
+// Set this when the dashboard runs behind a reverse proxy, so X-Forwarded-For
+// and X-Forwarded-Proto are honoured: rate limiting then sees the real client
+// address, and the session cookie is marked Secure for TLS terminated at the
+// proxy. Leave false when the app is reached directly, otherwise any client can
+// spoof those headers. Accepts anything express' 'trust proxy' accepts, e.g.
+// true, 1 (number of hops), 'loopback', or a specific address.
+exports.trustProxy = false;
+
 // time until link code is invalidated (in seconds)
 exports.linkCodeValidFor = 300;
 

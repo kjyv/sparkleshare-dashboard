@@ -3,7 +3,30 @@ var deviceProvider = null;
 var folderProvider = null;
 var linkCodeProvider = null;
 
+var crypto = require('crypto');
 var errors = require('./error');
+var RateLimiter = require('./rateLimit').RateLimiter;
+
+// A correct link code hands out a permanent device token carrying the code
+// owner's full ACL, so wrong guesses are budgeted per source address. Only
+// failures count, so a user fumbling one code is unaffected. Deliberately
+// per-IP and not global: a global budget would let one attacker stop everybody
+// else from linking a device.
+var linkCodeAttempts = new RateLimiter({ windowMs: 5 * 60 * 1000, max: 10 });
+
+var SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
+function tokensEqual(expected, given) {
+  if (typeof given !== 'string' || typeof expected !== 'string') {
+    return false;
+  }
+  var a = Buffer.from(expected, 'utf8');
+  var b = Buffer.from(given, 'utf8');
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
 
 module.exports = {
   setup: function(up, dp, fp, lcp) {
@@ -98,18 +121,59 @@ module.exports = {
   },
 
   validateLinkCode: function(req, res, next) {
+    var key = RateLimiter.byIp(req);
+
+    if (linkCodeAttempts.isBlocked(key)) {
+      res.set('Retry-After', String(linkCodeAttempts.retryAfter(key)));
+      return next(new errors.TooManyRequests('Too many link code attempts'));
+    }
+
     var code = req.body.code;
     if (code) {
       var valid = linkCodeProvider.isCodeValid(code);
       if (valid[0]) {
+        linkCodeAttempts.reset(key);
         req.linkCodeForUid = valid[1];
-        next();
-      } else {
-        res.send('Invalid link code', 403);
+        return next();
       }
-    } else {
-      res.send('Invalid link code', 403);
     }
+
+    linkCodeAttempts.hit(key);
+    next(new errors.Permission('Invalid link code'));
+  },
+
+  //issues a per-session CSRF token and makes it available to the templates
+  csrfToken: function(req, res, next) {
+    if (req.session) {
+      if (!req.session.csrfToken) {
+        req.session.csrfToken = crypto.randomBytes(32).toString('hex');
+      }
+      res.locals.csrfToken = req.session.csrfToken;
+    } else {
+      res.locals.csrfToken = '';
+    }
+    next();
+  },
+
+  //sameSite=lax alone does not cover a same-site attacker (another vhost or a
+  //plain-http sibling), so state-changing requests carry a token as well
+  csrfProtect: function(req, res, next) {
+    if (SAFE_METHODS.indexOf(req.method) !== -1) {
+      return next();
+    }
+
+    //device API clients authenticate with X-SPARKLE-* headers rather than the
+    //session cookie, so a cross-site form post cannot act as them
+    if (req.path.indexOf('/api/') === 0) {
+      return next();
+    }
+
+    var given = (req.body && req.body._csrf) || req.header('X-CSRF-Token');
+    if (req.session && tokensEqual(req.session.csrfToken, given)) {
+      return next();
+    }
+
+    next(new errors.Permission('Invalid or missing CSRF token'));
   },
 
   validateAuthCode: function(req, res, next) {

@@ -4,6 +4,7 @@ block main
   h1 #{__i('Modify User "%s"', u.login)}
 
   form(method="post", action=basepath + "/modifyUser/" + u.uid)
+    input(type="hidden", name="_csrf", value=csrfToken)
     p
       label #{__i('Name')}:
       input(name="name", value=u.name)
@@ -21,10 +22,10 @@ block main
             tr
               td= folder.name
               td
-                var hasAccess = false;
-                if (u.acl.indexOf(folder.id) >= 0)
-                  hasAccess = true;
-                input(type="checkbox", name="acl[]", value=folder.id, checked=hasAccess)
+                //- these were plain `var`/`if` lines before, which pug parses
+                //- as tags rather than code, so the box never came back checked
+                //- and saving the form silently dropped the user's whole ACL
+                input(type="checkbox", name="acl[]", value=folder.id, checked=(u.acl && u.acl.indexOf(folder.id) >= 0))
     p
       input(type="submit", value=__i('Modify'))
       input(type="hidden", name="login", value=u.login)

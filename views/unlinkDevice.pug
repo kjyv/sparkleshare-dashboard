@@ -8,6 +8,7 @@ block main
       | "#{d.ident}"
 
   form(method="post", action=basepath + "/unlinkDevice/" + d.id)
+    input(type="hidden", name="_csrf", value=csrfToken)
     p
       if (d.name)
         label #{__i('Name')}:

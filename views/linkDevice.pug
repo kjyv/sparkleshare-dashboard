@@ -35,6 +35,8 @@ block main
 
           $.ajax({
             url: "#{basepath}/getLinkCode",
+            type: 'POST',
+            data: { _csrf: "#{csrfToken}" },
             dataType: 'json',
             success: function(data) {
               $('#linkqr').html('');

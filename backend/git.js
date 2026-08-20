@@ -13,6 +13,16 @@ var mimeTypes = require('mime-types');
 var fs = require('fs');
 var pathlib = require('path');
 var async = require('async');
+var crypto = require('crypto');
+
+//NUL and other control characters make spawn() and fs.writeFile() throw
+//synchronously. On the putFile path that throw happens inside a git exit
+//callback, outside express' reach, so it takes the whole process down; a
+//newline additionally forges a second Content-Disposition parameter when the
+//path is echoed into a download filename. Neither is legitimate in a repo path.
+function hasControlChars(path) {
+  return /[\x00-\x1f\x7f]/.test(path);
+}
 
 function parseList(list, curPath, next) {
   var r = list.split(/\0/);
@@ -174,22 +184,23 @@ GitBackend.prototype = {
 
     //continue after git command has exited and do not care for output
     //(fixing problems with below logic when commands do not return anything)
-    var ignore_output
-    var ign_idx = params.indexOf("ignore_output")
-    if (ign_idx != -1) {
-      ignore_output = true
-      params.splice(ign_idx, 1)
-    } else {
-      ignore_output = false
-    }
-
-    var ignore_return_code
-    ign_idx = params.indexOf("ignore_return_code")
-    if (ign_idx != -1) {
-      ignore_return_code = true
-      params.splice(ign_idx, 1)
-    } else {
-      ignore_return_code = false
+    //callers append these as trailing arguments, so only strip them from the
+    //end: searching the whole array with indexOf would splice out a
+    //user-supplied path that happens to equal one of these strings, silently
+    //changing which path the git command acts on
+    var ignore_output = false
+    var ignore_return_code = false
+    for (;;) {
+      var last = params[params.length - 1]
+      if (last === "ignore_output") {
+        ignore_output = true
+        params.pop()
+      } else if (last === "ignore_return_code") {
+        ignore_return_code = true
+        params.pop()
+      } else {
+        break
+      }
     }
 
     //add path parameter, needed for older git versions
@@ -200,28 +211,34 @@ GitBackend.prototype = {
     //call git with all the given parameters
     var g = spawn(config.backend.git.bin, params, { encoding: 'binary' });
 
-    // under some very weird circumstances the 'exit'
-    // event may arise _before_ the 'data' event is triggered
-    // and in this case the ondata callback is called with
-    // an empty output. with this little trick we're synching
-    // the results of both callbacks and only return back if
-    // both have been called. this - of course - might go
-    // totally wrong if some exec call does not write anything
-    // to stdout and therefor never triggers the 'data' event ...
+    // 'exit' can fire before stdout has been drained, so this used to wait for
+    // both an 'exit' and a 'data' event before calling back. That never
+    // completed for a command which writes nothing to stdout - git cat-file on
+    // a zero-byte blob, for instance - leaving the request hung forever and the
+    // socket held open. 'close' is emitted only once the process has ended AND
+    // its stdio streams are closed, which is exactly the handshake wanted, so
+    // it is a single authoritative signal.
+    var exitCode, out, stderrOutput = '';
+    var finalized = false;
+
     var finalize = function() {
-    //handle data and exit events and call handler function that was passed
+      if (finalized) {
+        return;
+      }
+      finalized = true;
+
       if (exitCode && !ignore_return_code) {
         var errMsg = 'GIT failed (exit code ' + exitCode + '): git ' + params.join(' ');
         if (stderrOutput) {
           errMsg += '\n' + stderrOutput.trim();
         }
         return next(new Error(errMsg));
-      } else {
-        return next(null, out);
       }
+      //a command that produced nothing reports empty output rather than
+      //undefined, which callers like parseList would choke on
+      return next(null, typeof(out) == 'undefined' && !ondata ? '' : out);
     };
 
-    var exitCode, out, stderrOutput = '';
     if (ondata) {
       g.stdout.on('data', function(data) {
         out = true;
@@ -233,30 +250,31 @@ GitBackend.prototype = {
             out = '';
          }
          out += data.toString('utf8');
-         if (typeof(exitCode) != "undefined") {
-            finalize();
-         }
       });
     }
 
     g.stderr.on('data', function(data) {
        //console.log('git stderr: ' + data);
        stderrOutput += data.toString('utf8');
-       //in case there is stderr output, also allow finalizing on exit for calls that
-       //don't return data (not a proper solution really)
+       //preserved: callers of stderr-only commands used to receive this as the
+       //command's output
        if (typeof(out) == 'undefined') {
           out = "git: " + data;
        }
-       if (typeof(exitCode) != "undefined") {
-            finalize();
-       }
     });
 
-    g.on('exit', function(code) {
+    g.on('close', function(code) {
       exitCode = code;
       //console.log("git exit code: " + code);
-      if(typeof(out) != "undefined" || ignore_output)
-        finalize();
+      finalize();
+    });
+
+    g.on('error', function(error) {
+      //spawn itself failed (git missing, bad argument); without this the error
+      //event is unhandled and takes the process down
+      stderrOutput += error.message;
+      exitCode = exitCode || 1;
+      finalize();
     });
   },
 
@@ -276,6 +294,9 @@ GitBackend.prototype = {
     var arg = 'HEAD';
     var path = req.query.path;
     if (path) {
+      if (hasControlChars(path)) {
+        return next(new Error('Invalid file path'));
+      }
       arg += ':' + path;
     }
     this.execGit(['archive', arg, '--prefix=archive/', '--format=zip'], ondata, next);
@@ -292,6 +313,9 @@ GitBackend.prototype = {
     //so it can't be interpreted as a git option (argument injection)
     if (baseHash && !baseHash.match(/^[a-f0-9]{40}$/)) {
       return next(new Error('Invalid hash'));
+    }
+    if (hasControlChars(path)) {
+      return next(new Error('Invalid file path'));
     }
 
     var mybackend = this;
@@ -391,6 +415,9 @@ GitBackend.prototype = {
     if (normalizedPath.startsWith('..') || pathlib.isAbsolute(path)) {
       return next(new Error('Invalid file path'));
     }
+    if (hasControlChars(path)) {
+      return next(new Error('Invalid file path'));
+    }
 
     //enforce unix file ending for text data
     //TODO: detect previous line ending and keep it
@@ -399,7 +426,11 @@ GitBackend.prototype = {
     }
 
     var temp_dir = config.backend.git.temp
-    var wc_dir = pathlib.join(temp_dir, pathlib.basename(this.path))
+    //unique per operation: this used to be derived from the folder name alone,
+    //so two concurrent writes to one folder shared a working copy and deleted
+    //each other's checkout
+    var wc_dir = pathlib.join(temp_dir,
+      pathlib.basename(this.path) + '-' + crypto.randomBytes(8).toString('hex'))
 
     fsErrorHandler = function(err){
       if(err) {
@@ -413,10 +444,17 @@ GitBackend.prototype = {
     //otherwise: fs.mkdir(temp_dir, 0755, fsErrorHandler);
 
     var parent = this
-    var orig_path = parent.path
+
+    //The steps below the clone operate on the working copy. They used to do
+    //that by overwriting parent.path, which is the shared per-folder backend
+    //object: for as long as a write was in flight, concurrent reads of the same
+    //folder were served out of this temporary checkout, and were liable to fail
+    //outright once it was deleted. This delegating object carries a different
+    //path without touching the shared one.
+    var wc = Object.create(parent)
+    wc.path = pathlib.join(wc_dir, '.git')
 
     function cleanupWorkingCopy() {
-      parent.path = orig_path
       if (fs.existsSync(wc_dir)) {
         var rand = Math.floor(Math.random() * 10) + parseInt(new Date().getTime()).toString(36)
         var path_rand = wc_dir.replace(/\/$/, "") + rand
@@ -457,15 +495,9 @@ GitBackend.prototype = {
         });
       },
 
-      function(callback){
-        //change current directory to new working copy
-        parent.path = pathlib.join(wc_dir, '.git')
-        callback(null)
-      },
-
       //set username and email for new working copy
       function(callback){
-        parent.execGit(['config', 'user.name', req.user.name, 'ignore_output'],
+        wc.execGit(['config', 'user.name', req.user.name, 'ignore_output'],
           function(error, data){
             if (error) { return callback(error); }
             callback(null)
@@ -474,7 +506,7 @@ GitBackend.prototype = {
 
       function(callback){
         //TODO: add email field to UserProvider
-        parent.execGit(['config', 'user.email', req.user.login+'@'+req.user.deviceName,
+        wc.execGit(['config', 'user.email', req.user.login+'@'+req.user.deviceName,
           'ignore_output'], function(error, data){
             if (error) { return callback(error); }
             callback(null)
@@ -485,7 +517,7 @@ GitBackend.prototype = {
         //get original path and file (ignore errors when file doesn't exist yet)
         var checkoutArgs = ['--work-tree=' + wc_dir, 'checkout', 'HEAD', '--', path, 'ignore_output',
           'ignore_return_code'];
-        parent.execGit(checkoutArgs,
+        wc.execGit(checkoutArgs,
           function(error, data){
             if (error) { return callback(error); }
             callback(null)
@@ -511,7 +543,7 @@ GitBackend.prototype = {
 
       function(callback){
         //add the new file
-        parent.execGit(['--work-tree=' + wc_dir, 'add', pathlib.join(wc_dir, path), 'ignore_output'],
+        wc.execGit(['--work-tree=' + wc_dir, 'add', pathlib.join(wc_dir, path), 'ignore_output'],
           function(error, data){
             if (error) { return callback(error); }
             callback(null)
@@ -520,7 +552,7 @@ GitBackend.prototype = {
 
       function(callback){
         //commit only this new file
-        parent.execGit(['--work-tree=' + wc_dir, 'commit', pathlib.join(wc_dir, path), '-m',
+        wc.execGit(['--work-tree=' + wc_dir, 'commit', pathlib.join(wc_dir, path), '-m',
           '/ ‘' + path + '’', "ignore_return_code"], function(error, data){
             if (error) { return callback(error); }
             callback(null)
@@ -529,7 +561,7 @@ GitBackend.prototype = {
 
       function(callback){
         //push the commit
-        parent.execGit(['--work-tree=' + wc_dir, 'push'],
+        wc.execGit(['--work-tree=' + wc_dir, 'push'],
           function(error, data){
             if (error) { return callback(error); }
             callback(null)

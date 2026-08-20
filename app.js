@@ -20,6 +20,9 @@ const ExpressSession = require('express-session');
 const RedisStore = require('connect-redis').RedisStore;
 
 let redisClient = redis.createClient(config.redis || {});
+// unref'd only once the server is listening (see runApp): an unref'd socket is
+// not enough to hold the event loop open, so doing it earlier makes node exit
+// during startup before the upgrade query can come back.
 redisClient.on('error', console.log)
 let redisStore = new RedisStore({ client: redisClient })
 
@@ -28,7 +31,11 @@ let session = ExpressSession({
     maxAge: config.sessionValidFor,
     httpOnly: true,
     sameSite: 'lax',
-    secure: config.https.enabled
+    //'auto' marks the cookie Secure whenever the request itself was secure,
+    //which - with 'trust proxy' set below - includes TLS terminated at a
+    //reverse proxy. Tying this to config.https.enabled instead meant a
+    //proxied deployment shipped its session cookie without Secure.
+    secure: 'auto'
   },
   resave: true,
   saveUninitialized: false,
@@ -40,26 +47,23 @@ let session = ExpressSession({
 var sass = require('sass');
 var fs = require('fs');
 
-var app = null;
+var app = express();
+
+// Built here rather than in runApp() so an unreadable key/cert fails at startup,
+// but not listened on until runApp(): binding twice would leave a second,
+// unrestricted listener alongside the configured one.
+var server;
 if (config.https.enabled) {
   var https = require("https");
 
-  var privateKey = fs.readFileSync(config.https.key).toString();
-  var certificate = fs.readFileSync(config.https.cert).toString();
-  var options = {
-    key: privateKey,
-    cert: certificate
-  }
-  app = express();
-  var server = https.createServer(options, app).listen(config.listen.port, function () {
-    console.log("Express server listening on port " + config.listen.port);
-  });
+  server = https.createServer({
+    key: fs.readFileSync(config.https.key).toString(),
+    cert: fs.readFileSync(config.https.cert).toString()
+  }, app);
 } else {
-  http = require('http')
-  app = express()
-  var server = http.createServer(app).listen(app.get('port'), function () {
-    console.log("Express server listening on port " + config.listen.port);
-  });
+  var http = require('http');
+
+  server = http.createServer(app);
 }
 
 i18n.configure({
@@ -75,12 +79,13 @@ if (lf) {
 app.set('views', __dirname + '/views');
 app.set('view engine', 'pug');
 app.set('basepath', config.basepath);
-app.use(function (req, res, next) {
-  if ('x-forwarded-proto' in req.headers && req.headers['x-forwarded-proto'] == 'https') {
-    req.connection.encrypted = true;
-  }
-  next();
-});
+
+//X-Forwarded-* is only meaningful when a proxy we trust sets it. Previously
+//any client could send X-Forwarded-Proto: https and have the app treat its
+//plaintext connection as encrypted; express' own handling gates that on this
+//setting, and it is what makes req.ip (used for rate limiting) and the 'auto'
+//cookie flag above correct behind a proxy.
+app.set('trust proxy', config.trustProxy || false);
 
 var DeviceProvider = require('./deviceProvider').DeviceProvider;
 var deviceProvider = new DeviceProvider(redisClient);
@@ -112,10 +117,15 @@ app.use(cookieParser());
 app.use(flash());
 app.use(function(req, res, next) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-  if (!/\.css$/.test(req.path)) return next();
 
-  var scssPath = pathlib.join(__dirname, req.path.replace(/\.css$/, '.scss'));
-  var cssPath = pathlib.join(__dirname, 'public', req.path);
+  // req.path is the raw request target: it is not normalised, so joining it
+  // onto a directory lets "/../../.." escape. Take only the stylesheet name,
+  // from a pattern that cannot match a separator or a dot segment.
+  var name = /^\/stylesheets\/([\w-]+)\.css$/.exec(req.path);
+  if (!name) return next();
+
+  var scssPath = pathlib.join(__dirname, 'stylesheets', name[1] + '.scss');
+  var cssPath = pathlib.join(__dirname, 'public', 'stylesheets', name[1] + '.css');
 
   try {
     var srcStat = fs.statSync(scssPath);
@@ -182,6 +192,15 @@ var linkCodeProvider = new LinkCodeProvider();
 var middleware = require('./middleware');
 middleware.setup(userProvider, deviceProvider, folderProvider, linkCodeProvider);
 
+var RateLimiter = require('./rateLimit').RateLimiter;
+
+//scrypt runs on the event loop, so an unauthenticated login flood is also a
+//liveness problem, not just a guessing problem. Only failures are counted.
+var loginAttempts = new RateLimiter({ windowMs: 15 * 60 * 1000, max: 20 });
+
+app.use(middleware.csrfToken);
+app.use(middleware.csrfProtect);
+
 // Routes
 app.all(/^(?!\/api\/).+/, function (req, res, next) {
   session(req, res, next);
@@ -212,11 +231,34 @@ app.route('/login').get(function (req, res) {
       }
     }
   });
-}).post(passport.authenticate(config.userProvider.name, {
-  failureRedirect: '/login',
-  failureFlash: 'Invalid username or password.'
-}), function (req, res) {
-  res.redirect('/folder');
+}).post(function (req, res, next) {
+  var key = RateLimiter.byIp(req);
+
+  if (loginAttempts.isBlocked(key)) {
+    res.set('Retry-After', String(loginAttempts.retryAfter(key)));
+    return next(new errors.TooManyRequests('Too many login attempts'));
+  }
+
+  //custom callback rather than the failureRedirect option, so a failure can be
+  //counted against the limiter above
+  passport.authenticate(config.userProvider.name, function (error, user) {
+    if (error) {
+      return next(error);
+    }
+    if (!user) {
+      loginAttempts.hit(key);
+      req.flash('error', i18n.__('Invalid username or password.'));
+      return res.redirect('/login');
+    }
+
+    req.logIn(user, function (error) {
+      if (error) {
+        return next(error);
+      }
+      loginAttempts.reset(key);
+      res.redirect('/folder');
+    });
+  })(req, res, next);
 });
 
 app.route('/createFirstUser').get(middleware.userDbEmpty, function (req, res) {
@@ -261,26 +303,53 @@ app.route('/changeProfile').get(middleware.isLogged, function (req, res) {
     });
   };
 
-  var updatePassword = false;
-  if (req.body.new1) {
-    if (req.body.new1 != req.body.new2) {
-      req.flash('error', i18n.__('Passwords must match'));
+  var user = req.user;
+
+  var saveProfile = function () {
+    user.name = req.body.name;
+
+    userProvider.updateUser(user, function (error) {
+      if (error) {
+        return next(error);
+      }
+      req.flash('info', i18n.__('Profile updated'));
+      res.redirect('/changeProfile');
+    });
+  };
+
+  if (!req.body.new1) {
+    return saveProfile();
+  }
+
+  if (req.body.new1 != req.body.new2) {
+    req.flash('error', i18n.__('Passwords must match'));
+    return reRenderForm();
+  }
+
+  if (!req.body.current) {
+    req.flash('error', i18n.__('Current password is not correct'));
+    return reRenderForm();
+  }
+
+  //a live session alone must not be enough to set a new password, or a
+  //hijacked cookie (or an unlocked shared browser) turns into permanent
+  //account takeover with the real owner locked out
+  user.checkPassword(req.body.current, function (error, matches) {
+    if (error) {
+      return next(error);
+    }
+    if (!matches) {
+      req.flash('error', i18n.__('Current password is not correct'));
       return reRenderForm();
     }
 
-    updatePassword = true;
-  }
-
-  var user = req.user;
-  if (updatePassword) {
-    user.setPassword(req.body.new1);
-    req.flash('info', i18n.__('Password updated'));
-  }
-  user.name = req.body.name;
-
-  userProvider.updateUser(user, function (error) {
-    req.flash('info', i18n.__('Profile updated'));
-    res.redirect('/changeProfile');
+    user.setPassword(req.body.new1, function (error) {
+      if (error) {
+        return next(error);
+      }
+      req.flash('info', i18n.__('Password updated'));
+      saveProfile();
+    });
   });
 });
 
@@ -380,8 +449,17 @@ app.route('/createUser').get([middleware.isLogged, middleware.isAdmin], function
 });
 
 //TODO: put logic that is shared between publicFolder and folder into helper func
+//note: this deliberately does not apply checkFolderAcl - a folder marked
+//pub:true in the config is documented as a public folder, so any logged-in
+//user may read it. Only folders the caller can already reach ever render a
+//"Public Link", so this is reachable by URL-guessing alone; tighten it here if
+//pub is ever meant to mean "listed publicly but still ACL-gated".
 app.get('/publicFolder/:folderId', middleware.isLogged, function (req, res, next) {
   folderProvider.findById(req.params.folderId, function (error, folder) {
+    //without this, an unknown folderId dereferences undefined below and 500s
+    if (error) {
+      return next(error);
+    }
     if (!folder.pub) {
       next(new errors.Permission('This is not a public folder'));
     } else {
@@ -430,8 +508,10 @@ app.get(['/folder', '/folder/:folderId'], middleware.isLogged, middleware.checkF
         return next(error);
       }
 
-      //get current repo path from url
-      var curPath = req.query.path;
+      //get current repo path from url; defaulted because the preview below
+      //feeds it to path.dirname(), which throws on undefined, and that throw
+      //lands in a git callback where it would kill the process
+      var curPath = req.query.path || '';
       var parUrl = null;
 
       if (curPath) {
@@ -497,23 +577,20 @@ app.get(['/folder', '/folder/:folderId'], middleware.isLogged, middleware.checkF
         }
 
         //download file
+        var previewChunks = is_editable ? [] : null;
+
         folder.getRawData(req,
           function (error, data) {
             if (error) {
               return next(error);
             }
             if (is_editable) {
-              //if we have a viewable type, render preview/edit view
-              res.removeHeader('Content-Type')
-              res.render('preview', {
-                'file': filename,   //this file (called file because pug has filename reserved)
-                'path': querystring.escape(curPath),    //repo path to file (with filename)
-                'parent': folder,   //parent directory object
-                'parent_repo_path': querystring.escape(pathlib.dirname(curPath)),  //parent path in repo
-                'data': data,       //file contents
-                'filehash': req.query.hash
-              })
-              return
+              //this fires once per git stdout chunk, so the preview must not be
+              //rendered here: a file larger than one chunk (~64k) would render
+              //repeatedly and throw ERR_HTTP_HEADERS_SENT from inside a stream
+              //handler, where express cannot catch it and node exits. Collect
+              //the chunks and render once, below, when git is done.
+              previewChunks.push(data);
             } else {
               //otherwise just return the file contents
               res.write(data);
@@ -523,8 +600,20 @@ app.get(['/folder', '/folder/:folderId'], middleware.isLogged, middleware.checkF
             if (error) {
               return next(error);
             }
-            if (!is_editable)
-              res.end();
+            if (!is_editable) {
+              return res.end();
+            }
+
+            //if we have a viewable type, render preview/edit view
+            res.removeHeader('Content-Type')
+            res.render('preview', {
+              'file': filename,   //this file (called file because pug has filename reserved)
+              'path': querystring.escape(curPath),    //repo path to file (with filename)
+              'parent': folder,   //parent directory object
+              'parent_repo_path': querystring.escape(pathlib.dirname(curPath)),  //parent path in repo
+              'data': Buffer.concat(previewChunks).toString('utf8'),   //file contents
+              'filehash': req.query.hash
+            })
           }
         );
       } else {
@@ -605,7 +694,10 @@ app.get('/download/:folderId', middleware.isLogged, middleware.checkFolderAcl, f
       var filename = 'archive';
       var path = req.query.path;
       if (path && path != '') {
-        filename += '-' + path.replace(/[^\w\d-]/, '_');
+        //must be global: a single unreplaced quote, semicolon, CR or LF from the
+        //path would otherwise reach the Content-Disposition header below, which
+        //either injects a second header parameter or throws from writeHead
+        filename += '-' + path.replace(/[^\w\d-]/g, '_');
       }
       filename += '-' + req.params.folderId.substring(0, 8) + '.zip';
       res.writeHead(200, {
@@ -722,7 +814,11 @@ app.route('/modifyDevice/:did').get([middleware.isLogged, middleware.loadDevice,
   });
 });
 
-app.get('/getLinkCode', middleware.isLogged, function (req, res) {
+//POST, not GET: minting a link code changes state, and as a GET it could be
+//triggered by luring a logged-in user to a plain link (sameSite=lax still
+//sends the session cookie on a top-level navigation), letting an attacker
+//create codes for that user's uid on demand. As a POST it needs the CSRF token.
+app.post('/getLinkCode', middleware.isLogged, function (req, res) {
   var code = linkCodeProvider.getNewCode(req.user.uid);
   var schema = config.https.enabled ? 'https' : 'http';
   code.url = schema + '://' + req.header('host');
@@ -748,8 +844,16 @@ app.use(function (req, res, next) {
 app.use(errors.errorHandler);
 
 function runApp() {
-  app.listen(config.listen.port, config.listen.host, function () {
-    console.log("SparkleShare Dashboard listening on port %d in %s mode", config.listen.port, app.settings.env);
+  // app.listen() would open a second socket next to `server`; listen on the one
+  // server we built, so config.listen.host is honoured over TLS as well.
+  server.listen(config.listen.port, config.listen.host, function () {
+    // the listening socket now holds the event loop, so the redis client no
+    // longer needs to
+    redisClient.unref();
+
+    console.log("SparkleShare Dashboard listening on %s:%d over %s in %s mode",
+      config.listen.host || '*', config.listen.port,
+      config.https.enabled ? 'https' : 'http', app.settings.env);
   });
 
   if (config.fanout.enabled) {
@@ -761,8 +865,9 @@ function runApp() {
 }
 
 redisClient.connect().then(function () {
-  //the listening socket keeps the process alive; the redis socket need not
-  redisClient.unref();
+  //note: the client is deliberately not unref'd here - nothing else holds the
+  //event loop open yet, so node would exit before the upgrade query returns.
+  //runApp does it once the server is listening.
 
   // upgrade database
   require('./upgrade').upgrade(redisClient, runApp);

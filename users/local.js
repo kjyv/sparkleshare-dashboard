@@ -9,18 +9,27 @@ LocalUserProvider = function (options, redisClient, deviceProvider) {
 
   var provider = this;
   this.strategy = new Strategy(options, function (login, password, next) {
-    process.nextTick(function () {
-      provider.findByLogin(login, function (error, user) {
-        if (!user) {
-          return next(null, false, { message: 'Invalid login' })
-        }
+    provider.findByLogin(login, function (error, user) {
+      if (error) {
+        return next(error);
+      }
+      if (!user) {
+        //spend roughly what a real verification costs, so an unknown login
+        //cannot be told apart from a wrong password by response time
+        return burnHashTime(function () {
+          next(null, false, { message: 'Invalid login' });
+        });
+      }
 
-        if (user.checkPassword(password)) {
-          return next(null, user);
-        } else {
-          return next(null, false, { message: 'Invalid login' })
+      user.checkPassword(password, function (error, matches) {
+        if (error) {
+          return next(error);
         }
-      })
+        if (matches) {
+          return next(null, user);
+        }
+        next(null, false, { message: 'Invalid login' });
+      });
     })
   })
 }
@@ -34,9 +43,25 @@ function hash(msg, key) {
 var SCRYPT_KEYLEN = 64;
 
 // scrypt-based password hash, self-describing format: scrypt$<saltHex>$<hashHex>
-function scryptHash(password, saltBuf) {
-  var derived = crypto.scryptSync(String(password), saltBuf, SCRYPT_KEYLEN);
-  return 'scrypt$' + saltBuf.toString('hex') + '$' + derived.toString('hex');
+// Async throughout: scryptSync costs tens of milliseconds and this is a single
+// threaded server, so hashing on the event loop let a login flood stall every
+// other request.
+function scryptHash(password, saltBuf, next) {
+  crypto.scrypt(String(password), saltBuf, SCRYPT_KEYLEN, function (error, derived) {
+    if (error) {
+      return next(error);
+    }
+    next(null, 'scrypt$' + saltBuf.toString('hex') + '$' + derived.toString('hex'));
+  });
+}
+
+// Burns about one hash worth of time for logins that fail before any hash
+// comparison happens, so latency does not reveal which logins exist.
+var DUMMY_SALT = crypto.randomBytes(16);
+function burnHashTime(next) {
+  crypto.scrypt('', DUMMY_SALT, SCRYPT_KEYLEN, function () {
+    next();
+  });
 }
 
 LocalUserProvider.prototype = {
@@ -47,26 +72,30 @@ LocalUserProvider.prototype = {
         var newUser = new User();
         newUser.login = login;
         newUser.name = name;
-        newUser.setPassword(password);
         newUser.admin = admin;
         newUser.acl = acl;
-        toCallback(provider.rclient.incr('seq:nextUserId'), function (error, nuid) {
+        newUser.setPassword(password, function (error) {
           if (error) {
             return next(error);
           }
-          newUser.uid = nuid;
+          toCallback(provider.rclient.incr('seq:nextUserId'), function (error, nuid) {
+            if (error) {
+              return next(error);
+            }
+            newUser.uid = nuid;
 
-          //the login->uid mapping and the uids set must both be in place
-          //before the caller is told the user exists, or the very next login
-          //attempt can miss
-          Promise.all([
-            provider.rclient.set("uid:" + newUser.uid + ":user", JSON.stringify(newUser)),
-            provider.rclient.sAdd("uid:" + newUser.uid + ":deviceNames", ''),
-            provider.rclient.set("login:" + newUser.login + ":uid", String(newUser.uid)),
-            provider.rclient.sAdd("uids", String(newUser.uid))
-          ]).then(function () {
-            next(null, newUser);
-          }, next);
+            //the login->uid mapping and the uids set must both be in place
+            //before the caller is told the user exists, or the very next login
+            //attempt can miss
+            Promise.all([
+              provider.rclient.set("uid:" + newUser.uid + ":user", JSON.stringify(newUser)),
+              provider.rclient.sAdd("uid:" + newUser.uid + ":deviceNames", ''),
+              provider.rclient.set("login:" + newUser.login + ":uid", String(newUser.uid)),
+              provider.rclient.sAdd("uids", String(newUser.uid))
+            ]).then(function () {
+              next(null, newUser);
+            }, next);
+          });
         });
       } else {
         next(new Error('Login already used'));
@@ -234,34 +263,49 @@ User = function (data) {
 };
 
 User.prototype = {
-  setPassword: function (password) {
+  setPassword: function (password, next) {
     // store using scrypt; salt is embedded in the hash string
-    this.pass = scryptHash(password, crypto.randomBytes(16));
-    this.salt = '';
+    var user = this;
+    scryptHash(password, crypto.randomBytes(16), function (error, stored) {
+      if (error) {
+        return next(error);
+      }
+      user.pass = stored;
+      user.salt = '';
+      next(null);
+    });
   },
 
-  checkPassword: function (password) {
+  checkPassword: function (password, next) {
     if (typeof this.pass !== 'string' || this.pass.length === 0) {
-      return false;
+      return burnHashTime(function () {
+        next(null, false);
+      });
     }
 
     // new scrypt format: scrypt$<saltHex>$<hashHex>
     if (this.pass.indexOf('scrypt$') === 0) {
       var parts = this.pass.split('$');
       if (parts.length !== 3) {
-        return false;
+        return burnHashTime(function () {
+          next(null, false);
+        });
       }
       var saltBuf = Buffer.from(parts[1], 'hex');
       var expected = Buffer.from(parts[2], 'hex');
-      var actual = crypto.scryptSync(String(password), saltBuf, expected.length);
-      return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+      return crypto.scrypt(String(password), saltBuf, expected.length, function (error, actual) {
+        if (error) {
+          return next(error);
+        }
+        next(null, expected.length === actual.length && crypto.timingSafeEqual(expected, actual));
+      });
     }
 
     // legacy HMAC-SHA256 format (verified in constant time, upgraded on next change)
     var legacyExpected = Buffer.from(this.pass);
     var legacyActual = Buffer.from(hash(password, this.salt));
-    return legacyExpected.length === legacyActual.length &&
-      crypto.timingSafeEqual(legacyExpected, legacyActual);
+    next(null, legacyExpected.length === legacyActual.length &&
+      crypto.timingSafeEqual(legacyExpected, legacyActual));
   }
 };
 

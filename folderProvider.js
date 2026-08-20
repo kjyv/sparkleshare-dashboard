@@ -32,7 +32,10 @@ FolderProvider.prototype.findAll = function(next) {
 FolderProvider.prototype.findById = function(id, next) {
   var result = null;
 
-  if (id in this.folders) {
+  //hasOwnProperty, not `in`: `in` also matches inherited names, so ids like
+  //__proto__ or constructor would resolve to objects off Object.prototype and
+  //be handed to the callers below as if they were folders
+  if (Object.prototype.hasOwnProperty.call(this.folders, id)) {
     result = this.folders[id];
   }
 

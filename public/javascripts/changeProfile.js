@@ -1,13 +1,16 @@
   $(function() {
     $("#newpass2block").hide();
+    $("#currentpassblock").hide();
   });
 
   function showHideNewPass2() {
     var p1 = $("#newpass1").val();
     if (p1.length) {
       $("#newpass2block").show('fast');
+      $("#currentpassblock").show('fast');
     } else {
       $("#newpass2block").hide('fast');
+      $("#currentpassblock").hide('fast');
     }
   }
 

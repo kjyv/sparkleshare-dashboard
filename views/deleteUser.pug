@@ -4,6 +4,7 @@ block main
   h1 #{__i('Delete User "%s"', u.login)}
 
   form(method="post", action=basepath + "/deleteUser/" + u.uid)
+    input(type="hidden", name="_csrf", value=csrfToken)
     p
       label #{__i('Name:')}
       input(name="name", value=u.name, readonly=true)

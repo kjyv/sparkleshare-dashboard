@@ -4,6 +4,7 @@ block main
   h1 #{__i('Create first user')}
 
   form(method="post", action=basepath + "/createFirstUser")
+    input(type="hidden", name="_csrf", value=csrfToken)
     div.iwrapper.r
       label(id="loginlabel") #{__i('Username:')}
       input(name="login", value=formval.login, id="login")
