@@ -14,6 +14,7 @@ var config = require('./config');
 var errors = require('./error');
 var utils = require('./utils');
 var pathlib = require('path');
+var crypto = require('crypto');
 
 const redis = require('redis')
 const ExpressSession = require('express-session');
@@ -212,6 +213,33 @@ app.use(function (req, res, next) {
   res.header('X-Content-Type-Options', 'nosniff')
   res.header('X-Frame-Options', 'SAMEORIGIN')
   res.header('Referrer-Policy', 'same-origin')
+
+  //Everything this app loads is same-origin, so the policy can start from
+  //nothing and name only what is actually used. It matters most on the file
+  //preview and inline image/pdf routes, which serve repository content back
+  //from this origin. The two inline <script> blocks carry this nonce instead of
+  //the policy having to allow inline script wholesale.
+  res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+  res.header('Content-Security-Policy', [
+    "default-src 'none'",
+    "script-src 'self' 'nonce-" + res.locals.cspNonce + "'",
+    "style-src 'self'",
+    "img-src 'self'",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'",
+    "base-uri 'none'",
+    "object-src 'none'"
+  ].join('; '))
+
+  //pointless over plain http, and only correct about the scheme once
+  //'trust proxy' is configured for a terminating proxy. Deliberately without
+  //includeSubDomains or preload: both reach hosts this app knows nothing about
+  //and are painful to walk back.
+  if (req.secure) {
+    res.header('Strict-Transport-Security', 'max-age=15552000')
+  }
+
   next();
 });
 
@@ -243,10 +271,10 @@ app.get('/', function (req, res) {
   res.redirect('/login');
 });
 
-app.get('/logout', function (req, res) {
+//POST, so a third-party page cannot log a user out with an <img> tag
+app.post('/logout', function (req, res) {
   req.session.destroy(function () {
-    res.clearCookie('ua_session_token');
-    res.redirect('login');
+    res.redirect('/login');
   });
 });
 

@@ -23,7 +23,7 @@ block main
       span#timeleft 0
       | #{__i('seconds')}.
 
-  script(type="text/javascript").
+  script(type="text/javascript", nonce=cspNonce).
     (function () {
       var codeUrl = "#{basepath}/getLinkCode";
       var throbberUrl = "#{basepath}/images/throbber.gif";

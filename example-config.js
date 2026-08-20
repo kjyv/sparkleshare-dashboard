@@ -48,9 +48,14 @@ exports.sessionValidFor = 3600000 * 24     //24 hours
 // none | min | info | debug
 exports.logging = 'none';
 
+// Push notifications about folder changes, over a plain TCP pub/sub protocol.
+// It has no authentication: anything that can reach the port may subscribe to
+// any channel and announce on any channel, so notifications are both readable
+// and forgeable by any client that can connect. Keep host restricted to an
+// interface only trusted clients can reach - null would bind all of them.
 exports.fanout = {
   enabled: false,
-  host: null,
+  host: '127.0.0.1',
   port: 1986
 };
 

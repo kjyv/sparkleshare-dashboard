@@ -30,6 +30,22 @@ body {
     a {
       text-shadow: 0 2px 0 white;
     }
+    // logging out is a POST, so it is a form; keep it looking like the link it
+    // replaced rather than a native button
+    #logoutform {
+      display: inline;
+      button {
+        background: none;
+        border: none;
+        padding: 0;
+        margin: 0;
+        font: inherit;
+        color: inherit;
+        text-decoration: underline;
+        text-shadow: 0 2px 0 white;
+        cursor: pointer;
+      }
+    }
   }
   #homelink {
     display: block;

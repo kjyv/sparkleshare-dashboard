@@ -1,0 +1,25 @@
+fanout.js
+
+A fanout messaging server for node.js
+by @jazzychad - Chad Etzel
+
++ some modifications to be the default
+  messaging system for SparkleShare
+
+MIT Licensed
+
+Usage: subscribe <channel>
+       unsubscribe <channel>
+       announce <channel> <message>
+       ping
+
+
+This was a git submodule of github.com/nextsux/fanout.node.js, which has had no
+commit since 2011 and stopped working on supported node versions (it built its
+emitter from process.EventEmitter, removed from node long ago). It is vendored
+here so it can be maintained, keeping the original MIT licence and attribution.
+
+The protocol has NO AUTHENTICATION: any client that can reach the port may
+subscribe to any channel and announce on any channel, so notifications are
+readable and forgeable by anyone who can connect. Set config.fanout.host to an
+interface only trusted clients can reach.

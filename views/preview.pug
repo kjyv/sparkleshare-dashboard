@@ -17,7 +17,7 @@ block main
                 '&hash=' + filehash) #{__i('Download file')}
       li
         a#edit-link #{__i('Edit file')}
-        script.
+        script(nonce=cspNonce).
             ui.ready(function () {
                 var link = ui.byId('edit-link');
                 if (!link) {
