@@ -1,5 +1,6 @@
 var errors = require('./error');
 var crypto = require('crypto');
+var toCallback = require('./redisPromise').toCallback;
 
 DeviceProvider = function(redisClient) {
   this.rclient = redisClient;
@@ -17,17 +18,19 @@ DeviceProvider.prototype = {
       newDevice.name = reqName;
       newDevice.ownerUid = uid;
 
-      provider.rclient.incr('seq:nextDeviceId', function(error, nid) {
+      toCallback(provider.rclient.incr('seq:nextDeviceId'), function(error, nid) {
         if (error) { return next(error); }
         newDevice.id = nid;
 
-        provider.rclient.set("deviceId:" + newDevice.id + ":device", JSON.stringify(newDevice));
-        provider.rclient.set("deviceIdent:" + newDevice.ident + ":deviceId", newDevice.id);
-        provider.rclient.sadd("deviceIds", newDevice.id);
-        provider.rclient.sadd("uid:" + newDevice.ownerUid + ":devices", newDevice.id);
-        provider.rclient.sadd("uid:" + newDevice.ownerUid + ":deviceNames", newDevice.name);
-
-        next(null, newDevice);
+        Promise.all([
+          provider.rclient.set("deviceId:" + newDevice.id + ":device", JSON.stringify(newDevice)),
+          provider.rclient.set("deviceIdent:" + newDevice.ident + ":deviceId", String(newDevice.id)),
+          provider.rclient.sAdd("deviceIds", String(newDevice.id)),
+          provider.rclient.sAdd("uid:" + newDevice.ownerUid + ":devices", String(newDevice.id)),
+          provider.rclient.sAdd("uid:" + newDevice.ownerUid + ":deviceNames", newDevice.name)
+        ]).then(function () {
+          next(null, newDevice);
+        }, next);
       });
     });
   },
@@ -39,7 +42,7 @@ DeviceProvider.prototype = {
       reqName += " (" + num + ")";
     }
 
-    provider.rclient.sismember("uid:" + uid + ":deviceNames", reqName, function(error, ismember) {
+    toCallback(provider.rclient.sIsMember("uid:" + uid + ":deviceNames", reqName), function(error, ismember) {
       if (error) { return next(error); }
       if (ismember) {
         provider.findUniqueNameForUid(uid, name, ++num, next);
@@ -51,7 +54,7 @@ DeviceProvider.prototype = {
 
   findAll: function(next) {
     var provider = this;
-    provider.rclient.smembers("deviceIds", function(error, ids) {
+    toCallback(provider.rclient.sMembers("deviceIds"), function(error, ids) {
       if (error) { return next(error); }
       var r = [];
       var count = ids.length;
@@ -71,7 +74,7 @@ DeviceProvider.prototype = {
   },
 
   findById: function(id, next) {
-    this.rclient.get("deviceId:" + id + ":device", function(error, data) {
+    toCallback(this.rclient.get("deviceId:" + id + ":device"), function(error, data) {
       if (error) { return next(error); }
       if (!data) { return next(); }
 
@@ -81,7 +84,7 @@ DeviceProvider.prototype = {
 
   findByIdent: function(ident, next) {
     var provider = this;
-    this.rclient.get("deviceIdent:" + ident + ":deviceId", function(error, id) {
+    toCallback(this.rclient.get("deviceIdent:" + ident + ":deviceId"), function(error, id) {
       if (error) { return next(error); }
       if (!id) { return next(); }
 
@@ -92,7 +95,7 @@ DeviceProvider.prototype = {
   findByUserId: function(uid, next) {
     var provider = this;
 
-    this.rclient.smembers("uid:" + uid + ":devices", function(error, dids) {
+    toCallback(this.rclient.sMembers("uid:" + uid + ":devices"), function(error, dids) {
       if (error) { return next(error); }
 
       var r = [];
@@ -125,21 +128,24 @@ DeviceProvider.prototype = {
       }
 
       function saveDevice() {
-        provider.rclient.set("deviceId:" + fdevice.id + ":device", JSON.stringify(device));
-
-        return next(null, device);
+        toCallback(
+          provider.rclient.set("deviceId:" + fdevice.id + ":device", JSON.stringify(device)),
+          function(error) {
+            if (error) { return next(error); }
+            next(null, device);
+          });
       }
 
       if (device.name != fdevice.name) {
         if (fdevice.name && fdevice.name !== '') {
-          provider.rclient.srem("uid:" + fdevice.ownerUid + ":deviceNames", fdevice.name);
+          toCallback(provider.rclient.sRem("uid:" + fdevice.ownerUid + ":deviceNames", fdevice.name));
         }
 
         provider.findUniqueNameForUid(device.ownerUid, device.name, 0, function(error, reqName) {
           if (error) { return next(error); }
           device.name = reqName;
 
-          provider.rclient.sadd("uid:" + device.ownerUid + ":deviceNames", device.name);
+          toCallback(provider.rclient.sAdd("uid:" + device.ownerUid + ":deviceNames", device.name));
           saveDevice();
         });
       } else {
@@ -155,15 +161,21 @@ DeviceProvider.prototype = {
       if (error) { return next(error); }
       if (!fdevice) { return next(new errors.NotFound("Device not found")); }
 
-      provider.rclient.del("deviceId:" + fdevice.id + ":device");
-      provider.rclient.del("deviceIdent:" + fdevice.ident + ":deviceId");
-      provider.rclient.srem("deviceIds", fdevice.id);
-      provider.rclient.srem("uid:" + fdevice.ownerUid + ":devices", fdevice.id);
+      //unlinking must be complete before we report success, or a device could
+      //still authenticate after the user was told it was gone
+      var removals = [
+        provider.rclient.del("deviceId:" + fdevice.id + ":device"),
+        provider.rclient.del("deviceIdent:" + fdevice.ident + ":deviceId"),
+        provider.rclient.sRem("deviceIds", String(fdevice.id)),
+        provider.rclient.sRem("uid:" + fdevice.ownerUid + ":devices", String(fdevice.id))
+      ];
       if (fdevice.name && fdevice.name !== '') {
-        provider.rclient.srem("uid:" + fdevice.ownerUid + ":deviceNames", fdevice.name);
+        removals.push(provider.rclient.sRem("uid:" + fdevice.ownerUid + ":deviceNames", fdevice.name));
       }
 
-      next();
+      Promise.all(removals).then(function () {
+        next();
+      }, next);
     });
   }
 };

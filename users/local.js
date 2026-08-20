@@ -1,6 +1,7 @@
 var Strategy = require('passport-local').Strategy
 var crypto = require('crypto');
 var errors = require('../error');
+var toCallback = require('../redisPromise').toCallback;
 
 LocalUserProvider = function (options, redisClient, deviceProvider) {
   this.rclient = redisClient;
@@ -49,18 +50,23 @@ LocalUserProvider.prototype = {
         newUser.setPassword(password);
         newUser.admin = admin;
         newUser.acl = acl;
-        provider.rclient.incr('seq:nextUserId', function (error, nuid) {
+        toCallback(provider.rclient.incr('seq:nextUserId'), function (error, nuid) {
           if (error) {
             return next(error);
           }
           newUser.uid = nuid;
 
-          provider.rclient.set("uid:" + newUser.uid + ":user", JSON.stringify(newUser));
-          provider.rclient.sadd("uid:" + newUser.uid + ":deviceNames", '');
-          provider.rclient.set("login:" + newUser.login + ":uid", newUser.uid);
-          provider.rclient.sadd("uids", newUser.uid);
-
-          next(null, newUser);
+          //the login->uid mapping and the uids set must both be in place
+          //before the caller is told the user exists, or the very next login
+          //attempt can miss
+          Promise.all([
+            provider.rclient.set("uid:" + newUser.uid + ":user", JSON.stringify(newUser)),
+            provider.rclient.sAdd("uid:" + newUser.uid + ":deviceNames", ''),
+            provider.rclient.set("login:" + newUser.login + ":uid", String(newUser.uid)),
+            provider.rclient.sAdd("uids", String(newUser.uid))
+          ]).then(function () {
+            next(null, newUser);
+          }, next);
         });
       } else {
         next(new Error('Login already used'));
@@ -82,9 +88,12 @@ LocalUserProvider.prototype = {
         return next(new Error("You can not change login!"));
       }
 
-      provider.rclient.set("uid:" + fuser.uid + ":user", JSON.stringify(user));
-
-      return next(null, user);
+      toCallback(
+        provider.rclient.set("uid:" + fuser.uid + ":user", JSON.stringify(user)),
+        function (error) {
+          if (error) { return next(error); }
+          next(null, user);
+        });
     });
   },
 
@@ -100,11 +109,13 @@ LocalUserProvider.prototype = {
       }
 
       var delUser = function () {
-        provider.rclient.del("uid:" + fuser.uid + ":user");
-        provider.rclient.del("uid:" + fuser.uid + ":devices");
-        provider.rclient.del("uid:" + fuser.uid + ":deviceNames");
-        provider.rclient.del("login:" + fuser.login + ":uid");
-        provider.rclient.srem("uids", fuser.uid);
+        return Promise.all([
+          provider.rclient.del("uid:" + fuser.uid + ":user"),
+          provider.rclient.del("uid:" + fuser.uid + ":devices"),
+          provider.rclient.del("uid:" + fuser.uid + ":deviceNames"),
+          provider.rclient.del("login:" + fuser.login + ":uid"),
+          provider.rclient.sRem("uids", String(fuser.uid))
+        ]);
       };
 
       // unlink all devices owned by user
@@ -115,7 +126,7 @@ LocalUserProvider.prototype = {
 
         var count = devices.length;
         if (count === 0) {
-          delUser();
+          return delUser().then(function () { next(); }, next);
         }
         devices.forEach(function (device) {
           provider.deviceProvider.unlinkDevice(device.id, function (error) {
@@ -123,18 +134,16 @@ LocalUserProvider.prototype = {
               return next(error);
             }
             if (--count === 0) {
-              delUser();
+              delUser().then(function () { next(); }, next);
             }
           });
         });
       });
-
-      next();
     });
   },
 
   findByUid: function (uid, next) {
-    this.rclient.get("uid:" + uid + ":user", function (error, data) {
+    toCallback(this.rclient.get("uid:" + uid + ":user"), function (error, data) {
       if (error) {
         return next(error);
       }
@@ -147,7 +156,7 @@ LocalUserProvider.prototype = {
 
   findByLogin: function (login, next) {
     var provider = this;
-    provider.rclient.get("login:" + login + ":uid", function (error, uid) {
+    toCallback(provider.rclient.get("login:" + login + ":uid"), function (error, uid) {
 
       if (error) {
         return next(error);
@@ -165,12 +174,12 @@ LocalUserProvider.prototype = {
   },
 
   getUserCount: function (next) {
-    this.rclient.scard("uids", next);
+    toCallback(this.rclient.sCard("uids"), next);
   },
 
   findAll: function (next) {
     var provider = this;
-    provider.rclient.smembers("uids", function (error, uids) {
+    toCallback(provider.rclient.sMembers("uids"), function (error, uids) {
       if (error) {
         return next(error);
       }

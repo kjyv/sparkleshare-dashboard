@@ -9,7 +9,7 @@ GitBackend = function (path) {
 
 var spawn = require('child_process').spawn;
 var querystring = require('querystring');
-var mime = require('mime');
+var mimeTypes = require('mime-types');
 var fs = require('fs');
 var pathlib = require('path');
 var async = require('async');
@@ -26,10 +26,7 @@ function parseList(list, curPath, next) {
       var mimeType = null;
       if (x[1] == 'blob') {
         type = "file";
-        mimeType = mime.getType(x[4]);
-        if(mimeType === null) {
-          mimeType = "text/plain"
-        }
+        mimeType = mimeTypes.lookup(x[4]) || "text/plain";
       } else if (x[1] == 'tree') {
         type = "dir";
         mimeType = "dir";

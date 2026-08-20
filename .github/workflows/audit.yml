@@ -16,7 +16,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # connect-redis 10 requires node >=22; keep in step with package.json
+          node-version: 22
 
       - run: npm ci
 

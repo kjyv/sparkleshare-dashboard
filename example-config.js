@@ -25,6 +25,12 @@ exports.https = {
 exports.basepath = '';
 exports.externalUrl = null;
 
+// Connection options for the redis server holding users, devices and sessions.
+// An empty object means localhost:6379. Anything node-redis' createClient
+// accepts works here, e.g.:
+//   exports.redis = { url: 'redis://:password@redis.internal:6379/0' };
+exports.redis = {};
+
 // time until link code is invalidated (in seconds)
 exports.linkCodeValidFor = 300;
 
